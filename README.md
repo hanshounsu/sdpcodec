@@ -4,6 +4,10 @@ Clean training entrypoint for the HuBERT RVQ6561 baseline:
 
 `sdpcodec/hubert/MLS+LS/25Hz/rvq6561/nearbyrefclip/b4ddp4acc1/train6s/val6s`
 
+Demo page:
+
+https://sdpcodec.github.io/sdpcodec/
+
 The 2026-05-23/2026-05-24 output directories contain mixed stale Hydra files.
 For this repo, the RVQ source of truth is the W&B/launch metadata from the
 RVQ continuation, not the stale saved Hydra config.
