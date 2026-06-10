@@ -1,0 +1,363 @@
+seed: 1024
+deterministic: false
+
+preprocess:
+  datasets:
+    LibriSpeech:
+      root: /mnt/SSD/hounsu/datasets/LibriSpeech
+      trainsets:
+        - train-clean-100
+        - train-clean-360
+        - train-other-500
+      valsets:
+        - dev-clean
+      testsets:
+        - test-clean
+  view:
+    train_filelist: ./filelists/librispeech_train.txt
+    val_filelist: ./filelists/librispeech_val.txt
+    test_filelist: ./filelists/librispeech_test.txt
+  audio:
+    sr: 16000
+    normalization: false
+    max_wav_value: 32768.0
+
+dataset:
+  name: all
+  dataset:
+    _target_: data_module.FSDataset
+  train:
+    batch_size: 4
+    num_workers: 4
+    prefetch_factor: 4
+    shuffle: true
+    dynamic_batch: false
+  val:
+    batch_size: 4
+    num_workers: 4
+    prefetch_factor: 8
+    shuffle: false
+    multiprocessing_context: spawn
+  test:
+    batch_size: 1
+    num_workers: 4
+    prefetch_factor: 8
+    shuffle: false
+  padding_idx: 0
+  frame_length: 200
+  latent_hop_length: 320
+  min_audio_length: 96000
+  ref_segment_duration: 6.0
+  min_ref_seconds: 3.0
+  timbre_perturb: false
+  timbre_rate_min: 0.85
+  timbre_rate_max: 1.2
+  timbre_rate_num: 100
+  quantize_sr: 10
+  mls:
+    dataset_id: parler-tts/mls_eng
+    languages:
+      - english
+    train_split: train
+    val_split: dev
+    test_split: test
+    streaming: false
+    seed: 1024
+    shuffle_buffer_size: 2000
+    streaming_num_workers: 0
+  drop_short_samples: false
+  filter_min_audio_length: 144000
+  train_ref_clip_mode: nearby
+
+model:
+  mel_params:
+    sample_rate: 16000
+    n_fft: 1024
+    win_length: 640
+    hop_length: 320
+    mel_fmin: 10
+    mel_fmax: null
+    num_mels: 128
+
+  f0_codec:
+    use_codec_structure: true
+    input_emb_width: 2
+    output_emb_width: 128
+    levels: 1
+    downs_t:
+      - [1, 1, 1, 1]
+    enc_strides_t:
+      - [3, 4, 5, 8]
+    dec_strides_t:
+      - [8, 5, 4, 3]
+    width: 64
+    depth: 4
+    m_conv: 1.0
+    channel_growth_rate: 4
+    dilation_growth_rate: 3
+    encoder_ngf: 32
+    encoder_use_rnn: true
+    encoder_rnn_bidirectional: false
+    encoder_rnn_num_layers: 2
+    encoder_up_ratios: [1, 1, 2, 2]
+    encoder_dilations: [1, 3, 9]
+    encoder_out_channels: 128
+    encoder_activation_type: LeakyReLU
+    encoder_leaky_relu_params:
+      negative_slope: 0.1
+    decoder_ngf: 32
+    decoder_use_rnn: true
+    decoder_rnn_bidirectional: false
+    decoder_rnn_num_layers: 2
+    decoder_rnn_type: lstm
+    decoder_up_ratios: [2, 2, 1, 1]
+    decoder_dilations: [1, 3, 9]
+    decoder_activation_type: LeakyReLU
+    decoder_leaky_relu_params:
+      negative_slope: 0.1
+    decoder_use_mhca: true
+    decoder_mhca_num_heads: 2
+    decoder_mhca_dropout: 0.2
+    decoder_mhca_key_dim: 128
+    decoder_mhca_use_sdpa: true
+    spk_cond:
+      type: [mhca, concat]
+      num_heads: ${..decoder_mhca_num_heads}
+      dropout: ${..decoder_mhca_dropout}
+      key_dim: ${..decoder_mhca_key_dim}
+      use_sdpa: ${..decoder_mhca_use_sdpa}
+    zero_out_all_unvoiced: false
+    use_normalized_f0: true
+    finetune_f0_extractor: false
+    upsample_extracted_f0: false
+    use_fcpe_loss: true
+    fcpe_out_dims: 360
+    use_unnormf0_mse_loss: false
+
+  speaker_encoder:
+    speaker_encoder_type: wavlm
+    use_perceiver_encoder: true
+    perceiver_use_flash_attn: true
+    use_quantizer: false
+    input_dim: 128
+    out_dim: 512
+    latent_dim: 128
+    token_num: 128
+    norm_layer: bn
+    wavlm_checkpoint: /home/hounsu/voice/sdpcodec/pretrained_models/wavlm/WavLM-Large.pt
+
+  codec_encoder:
+    use_vqw2v: false
+    freeze_vqw2v_encoder: true
+    use_w2v2: false
+    freeze_w2v2_encoder: true
+    use_hubert: true
+    freeze_hubert_encoder: true
+    hubert_model_name: facebook/hubert-large-ls960-ft
+    hubert_use_transformer: true
+    hubert_hidden_layers: [11, 14, 16]
+    hubert_hidden_mode: avg
+    hubert_ngf: 1024
+    use_vqw2v_continuous: true
+    up_ratios: [2]
+    dilations: [1, 3, 9]
+    ngf: 32
+    out_channels: 512
+    activation_type: SnakeBeta
+    leaky_relu_params:
+      negative_slope: 0.1
+    temporal:
+      use: false
+      type: lstm
+      bidirectional: false
+      mamba: {}
+
+  codec_decoder:
+    in_channels: 512
+    upsample_initial_channel: 512
+    ngf: 32
+    up_ratios: [8, 5, 4, 4]
+    dilations: [1, 3, 9]
+    quantizer_type: rvq
+    freeze_kvq_emb: true
+    use_vqw2v_embed: false
+    vq_num_quantizers: 1
+    vq_dim: 512
+    vq_commit_weight: 0.25
+    vq_weight_init: false
+    vq_full_commit_loss: false
+    codebook_size: 6561
+    codebook_dim: 8
+    speaker_condition: true
+    f0_condition: true
+    condition_dim: 512
+    snake_logscale: true
+    f0_speaker_condition: true
+    use_stage_speaker_film: false
+    activation_type: SnakeBeta
+    leaky_relu_params:
+      negative_slope: 0.1
+    spk_cond:
+      use: true
+      type: [mhca]
+      num_heads: 2
+      dropout: 0.2
+    use_mhca: true
+    mhca_num_heads: 2
+    mhca_dropout: 0.2
+    mhca_use_sdpa: true
+    temporal:
+      use: true
+      type: lstm
+      bidirectional: false
+      mamba: {}
+
+  mpd:
+    periods: [2, 3, 5, 7, 11]
+    max_downsample_channels: 256
+    channels: 12
+    channel_increasing_factor: 4
+
+  mstft:
+    stft_params:
+      fft_sizes: [128, 256, 512, 1024, 2048]
+      hop_sizes: [32, 64, 128, 256, 512]
+      win_lengths: [128, 256, 512, 1024, 2048]
+      window: hann_window
+    in_channels: 1
+    out_channels: 1
+    kernel_sizes: [5, 3]
+    channels: 16
+    max_downsample_channels: 256
+    downsample_scales: [2, 2, 2]
+    use_weight_norm: true
+
+train:
+  trainer:
+    accelerator: gpu
+    devices: 4
+    min_steps: 180000000
+    max_steps: 180000000
+    precision: 32-true
+    limit_val_batches: null
+    limit_train_batches: null
+    log_every_n_steps: 50
+    num_sanity_val_steps: 9
+    accumulate_grad_batches: 1
+    val_check_interval: 10000
+    sync_batchnorm: true
+    check_val_every_n_epoch: 1
+  lambdas:
+    lambda_disc: 1.0
+    lambda_feat_match_loss: 1.0
+    lambda_mel_loss: 15.0
+    lambda_adv: 1.0
+    lambda_stft_loss: 1.0
+    lambda_vq_loss: 1
+    lambda_xd_loss: 1.0
+    lambda_mi_loss: 100.0
+    lambda_f0_vq_loss: 1.0
+    lambda_f0_recon_loss: 10.0
+    lambda_vuv_recon_loss: 10.0
+    lambda_fcpe_loss: 10.0
+  use_mel_loss: true
+  use_feat_match_loss: true
+  gan_loss:
+    mode: lsgan
+    use_bigvsan: false
+  adversarial:
+    preset: null
+    extra_discriminators: []
+    cqt_segment_seconds: null
+    cqt_segment_samples: null
+    detach_f0_conds_for_audio: null
+    detach_f0_conds_for_audio_until_step: null
+  apn_aux_loss:
+    use: null
+    amplitude_weight: 45.0
+    phase_weight: 100.0
+    consistency_weight: 20.0
+    real_imag_weight: 2.25
+    mel_weight: 45.0
+    warmup_steps: null
+    warmup_init_scale: 0.0
+    max_scale: 1.0
+    scale_mel_with_aux: true
+  num_pesq_processor: 4
+  transit_step: 1000
+  xd_loss_fade_step: null
+  gradient_accumulation_steps: 1
+  unfreeze_encoder_step: null
+  cmi_steps: 5
+  use_torch_compile: false
+  wandb_enabled: true
+  wandb_offline: false
+  wandb_project: SDPCodec
+  wandb_name: sdpcodec/hubert/MLS+LS/25Hz/rvq6561/nearbyrefclip/b4ddp4acc1/train6s/val6s
+  wandb_append_timestamp: true
+  compile_mode: default
+  use_val_utmos: true
+  use_val_wavlm: true
+  use_val_wer: true
+  ddp_find_unused_parameters: true
+  ddp_static_graph: true
+  ddp_gradient_as_bucket_view: false
+  optimizer_zero_grad_set_to_none: false
+  allow_tf32: false
+  float32_matmul_precision: highest
+  profile_timing_enabled: false
+  profile_timing_sync_cuda: true
+  profile_timing_warmup_steps: 5
+  profile_timing_log_every: 20
+  remove_weight_norm_from_modules: []
+  stft_loss_params:
+    fft_sizes: [128, 256, 512, 1024, 2048]
+    hop_sizes: [32, 64, 128, 256, 512]
+    win_lengths: [128, 256, 512, 1024, 2048]
+    window: hann_window
+  gen_optim_params:
+    lr: 1.0
+    betas: [0.8, 0.9]
+  disc_optim_params:
+    lr: 1.0
+    betas: [0.8, 0.9]
+  mi_optim_params:
+    lr: 1.0
+    betas: [0.8, 0.9]
+  gen_grad_clip: 1.0
+  disc_grad_clip: 1.0
+  mi_grad_clip: 1.0
+  gen_schedule_params:
+    warmup_step: 1000
+    down_step: 500000
+    min_lr: 1.0e-05
+    max_lr: 1.0e-04
+  disc_schedule_params:
+    warmup_step: 1000
+    down_step: 500000
+    min_lr: 1.0e-05
+    max_lr: 1.0e-04
+  mi_schedule_params:
+    warmup_step: 1000
+    down_step: 500000
+    min_lr: 1.0e-05
+    max_lr: 1.0e-04
+  manual_ddp_grad_average: true
+  ddp_verify_grad_sync_steps: 3
+  preload_val_metric_models: false
+
+log_dir: pl_log
+debug: false
+ckpt: null
+id: null
+input_dir: null
+output_dir: null
+cache_dir: null
+voice_conversion: vc
+
+hydra:
+  output_subdir: hydra
+  job:
+    chdir: true
+  run:
+    dir: /data/hounsu/voice/sdpcodec/outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
