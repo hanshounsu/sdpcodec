@@ -28,6 +28,17 @@ Useful local overrides:
 - `SdpCodecSystem`: alias for `SdpCodecLightningModule`.
 - `sdpcodec_hubert_rvq6561.yaml`: the single baseline config.
 
+## Config Surface
+
+The public YAML uses selector/list fields instead of `use_*` flags:
+
+- `speaker_encoder.encoder`: `wavlm`, `ecapa_tdnn`, `ecapa_tdnn_speechbrain`
+- `speaker_encoder.quantizer`: `none`, `fsq`, `rvq`, `simvq`
+- `speaker_encoder.post_encoder.stages`: stackable stages such as `perceiver`
+- `codec_encoder.encoder`: `hubert`, `wav2vec2`, `vqw2v`, `w2vbert2`, `s3tokenizer`
+- `codec_decoder.quantizer`: `rvq`, `fsq`, `simvq`
+- `codec_decoder.speaker_conditioning`: list, for example `[mhca]`
+
 The copied `vq`, `module`, `criterions`, `common`, `metrics`, and `ptl`
 directories are compatibility implementation code from BigCodec. The public API
 above is the new surface.

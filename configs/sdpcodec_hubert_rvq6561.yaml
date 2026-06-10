@@ -5,14 +5,9 @@ preprocess:
   datasets:
     LibriSpeech:
       root: /mnt/SSD/hounsu/datasets/LibriSpeech
-      trainsets:
-        - train-clean-100
-        - train-clean-360
-        - train-other-500
-      valsets:
-        - dev-clean
-      testsets:
-        - test-clean
+      trainsets: [train-clean-100, train-clean-360, train-other-500]
+      valsets: [dev-clean]
+      testsets: [test-clean]
   view:
     train_filelist: ./filelists/librispeech_train.txt
     val_filelist: ./filelists/librispeech_val.txt
@@ -56,8 +51,7 @@ dataset:
   quantize_sr: 10
   mls:
     dataset_id: parler-tts/mls_eng
-    languages:
-      - english
+    languages: [english]
     train_split: train
     val_split: dev
     test_split: test
@@ -80,7 +74,10 @@ model:
     num_mels: 128
 
   f0_codec:
-    use_codec_structure: true
+    structure: codec
+    pitch_representation: normalized
+    extraction_rate: frame
+    losses: [fcpe]
     input_emb_width: 2
     output_emb_width: 128
     levels: 1
@@ -95,70 +92,58 @@ model:
     m_conv: 1.0
     channel_growth_rate: 4
     dilation_growth_rate: 3
-    encoder_ngf: 32
-    encoder_use_rnn: true
-    encoder_rnn_bidirectional: false
-    encoder_rnn_num_layers: 2
-    encoder_up_ratios: [1, 1, 2, 2]
-    encoder_dilations: [1, 3, 9]
-    encoder_out_channels: 128
-    encoder_activation_type: LeakyReLU
-    encoder_leaky_relu_params:
-      negative_slope: 0.1
-    decoder_ngf: 32
-    decoder_use_rnn: true
-    decoder_rnn_bidirectional: false
-    decoder_rnn_num_layers: 2
-    decoder_rnn_type: lstm
-    decoder_up_ratios: [2, 2, 1, 1]
-    decoder_dilations: [1, 3, 9]
-    decoder_activation_type: LeakyReLU
-    decoder_leaky_relu_params:
-      negative_slope: 0.1
-    decoder_use_mhca: true
-    decoder_mhca_num_heads: 2
-    decoder_mhca_dropout: 0.2
-    decoder_mhca_key_dim: 128
-    decoder_mhca_use_sdpa: true
-    spk_cond:
-      type: [mhca, concat]
-      num_heads: ${..decoder_mhca_num_heads}
-      dropout: ${..decoder_mhca_dropout}
-      key_dim: ${..decoder_mhca_key_dim}
-      use_sdpa: ${..decoder_mhca_use_sdpa}
     zero_out_all_unvoiced: false
-    use_normalized_f0: true
     finetune_f0_extractor: false
-    upsample_extracted_f0: false
-    use_fcpe_loss: true
     fcpe_out_dims: 360
-    use_unnormf0_mse_loss: false
+    encoder:
+      ngf: 32
+      recurrent: lstm
+      recurrent_layers: 2
+      recurrent_bidirectional: false
+      up_ratios: [1, 1, 2, 2]
+      dilations: [1, 3, 9]
+      out_channels: 128
+      activation: LeakyReLU
+      negative_slope: 0.1
+    decoder:
+      ngf: 32
+      recurrent: lstm
+      recurrent_layers: 2
+      recurrent_bidirectional: false
+      up_ratios: [2, 2, 1, 1]
+      dilations: [1, 3, 9]
+      activation: LeakyReLU
+      negative_slope: 0.1
+      speaker_conditioning: [mhca, concat]
+      mhca_heads: 2
+      mhca_dropout: 0.2
+      mhca_key_dim: 128
+      attention_backend: sdpa
 
   speaker_encoder:
-    speaker_encoder_type: wavlm
-    use_perceiver_encoder: true
-    perceiver_use_flash_attn: true
-    use_quantizer: false
+    encoder: wavlm
+    quantizer: none
     input_dim: 128
     out_dim: 512
     latent_dim: 128
     token_num: 128
     norm_layer: bn
     wavlm_checkpoint: /home/hounsu/voice/sdpcodec/pretrained_models/wavlm/WavLM-Large.pt
+    post_encoder:
+      stages:
+        - type: perceiver
+          tokens: 128
+          dim: 128
+          attention_backend: flash
 
   codec_encoder:
-    use_vqw2v: false
-    freeze_vqw2v_encoder: true
-    use_w2v2: false
-    freeze_w2v2_encoder: true
-    use_hubert: true
-    freeze_hubert_encoder: true
+    encoder: hubert
+    feature: transformer
+    trainable: false
     hubert_model_name: facebook/hubert-large-ls960-ft
-    hubert_use_transformer: true
     hubert_hidden_layers: [11, 14, 16]
     hubert_hidden_mode: avg
     hubert_ngf: 1024
-    use_vqw2v_continuous: true
     up_ratios: [2]
     dilations: [1, 3, 9]
     ngf: 32
@@ -166,51 +151,35 @@ model:
     activation_type: SnakeBeta
     leaky_relu_params:
       negative_slope: 0.1
-    temporal:
-      use: false
-      type: lstm
-      bidirectional: false
-      mamba: {}
+    temporal: none
 
   codec_decoder:
+    quantizer: rvq
+    quantizers: 1
     in_channels: 512
     upsample_initial_channel: 512
     ngf: 32
     up_ratios: [8, 5, 4, 4]
     dilations: [1, 3, 9]
-    quantizer_type: rvq
-    freeze_kvq_emb: true
-    use_vqw2v_embed: false
-    vq_num_quantizers: 1
     vq_dim: 512
     vq_commit_weight: 0.25
     vq_weight_init: false
     vq_full_commit_loss: false
     codebook_size: 6561
     codebook_dim: 8
-    speaker_condition: true
-    f0_condition: true
+    speaker_conditioning: [mhca]
+    f0_conditioning: [concat]
+    f0_speaker_conditioning: enabled
     condition_dim: 512
     snake_logscale: true
-    f0_speaker_condition: true
-    use_stage_speaker_film: false
     activation_type: SnakeBeta
     leaky_relu_params:
       negative_slope: 0.1
-    spk_cond:
-      use: true
-      type: [mhca]
-      num_heads: 2
-      dropout: 0.2
-    use_mhca: true
-    mhca_num_heads: 2
+    mhca_heads: 2
     mhca_dropout: 0.2
-    mhca_use_sdpa: true
+    mhca_attention_backend: sdpa
     temporal:
-      use: true
       type: lstm
-      bidirectional: false
-      mamba: {}
 
   mpd:
     periods: [2, 3, 5, 7, 11]
@@ -230,7 +199,7 @@ model:
     channels: 16
     max_downsample_channels: 256
     downsample_scales: [2, 2, 2]
-    use_weight_norm: true
+    weight_norm: true
 
 train:
   trainer:
@@ -247,6 +216,7 @@ train:
     val_check_interval: 10000
     sync_batchnorm: true
     check_val_every_n_epoch: 1
+  losses: [mel, feat_match]
   lambdas:
     lambda_disc: 1.0
     lambda_feat_match_loss: 1.0
@@ -260,11 +230,8 @@ train:
     lambda_f0_recon_loss: 10.0
     lambda_vuv_recon_loss: 10.0
     lambda_fcpe_loss: 10.0
-  use_mel_loss: true
-  use_feat_match_loss: true
   gan_loss:
     mode: lsgan
-    use_bigvsan: false
   adversarial:
     preset: null
     extra_discriminators: []
@@ -273,7 +240,7 @@ train:
     detach_f0_conds_for_audio: null
     detach_f0_conds_for_audio_until_step: null
   apn_aux_loss:
-    use: null
+    enabled: null
     amplitude_weight: 45.0
     phase_weight: 100.0
     consistency_weight: 20.0
@@ -289,16 +256,13 @@ train:
   gradient_accumulation_steps: 1
   unfreeze_encoder_step: null
   cmi_steps: 5
-  use_torch_compile: false
+  compile: none
   wandb_enabled: true
   wandb_offline: false
   wandb_project: SDPCodec
   wandb_name: sdpcodec/hubert/MLS+LS/25Hz/rvq6561/nearbyrefclip/b4ddp4acc1/train6s/val6s
   wandb_append_timestamp: true
-  compile_mode: default
-  use_val_utmos: true
-  use_val_wavlm: true
-  use_val_wer: true
+  validation_metrics: [utmos, wavlm, wer]
   ddp_find_unused_parameters: true
   ddp_static_graph: true
   ddp_gradient_as_bucket_view: false
