@@ -18,7 +18,6 @@ from pytorch_lightning.callbacks import TQDMProgressBar
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.strategies import DDPStrategy
 
-from sdpcodec.config_compat import expand_legacy_config
 from sdpcodec.data import SdpCodecDataModule
 from sdpcodec.system import SdpCodecLightningModule
 
@@ -208,14 +207,13 @@ def train(cfg: Any) -> None:
     _save_resolved_config(cfg, run_dir, config_name)
 
     logger = _build_logger(cfg, run_dir, ts_slug)
-    runtime_cfg = expand_legacy_config(cfg)
-    callbacks = _build_callbacks(runtime_cfg, wandb_enabled=bool(logger))
-    kwargs = _trainer_kwargs(runtime_cfg, callbacks)
+    callbacks = _build_callbacks(cfg, wandb_enabled=bool(logger))
+    kwargs = _trainer_kwargs(cfg, callbacks)
 
-    datamodule = SdpCodecDataModule(runtime_cfg)
-    model = SdpCodecLightningModule(runtime_cfg)
+    datamodule = SdpCodecDataModule(cfg)
+    model = SdpCodecLightningModule(cfg)
     trainer = pl.Trainer(**kwargs, callbacks=callbacks, logger=logger)
-    trainer.fit(model, datamodule=datamodule, ckpt_path=getattr(runtime_cfg, "ckpt", None))
+    trainer.fit(model, datamodule=datamodule, ckpt_path=getattr(cfg, "ckpt", None))
 
 
 if __name__ == "__main__":

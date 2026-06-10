@@ -1,1 +1,1 @@
-"""Legacy dataset implementation used by SDPCodec."""
+"""Dataset implementation used by SDPCodec."""

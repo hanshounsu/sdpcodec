@@ -1,0 +1,246 @@
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}
+  launcher:
+    _target_: hydra._internal.core_plugins.basic_launcher.BasicLauncher
+  sweeper:
+    _target_: hydra._internal.core_plugins.basic_sweeper.BasicSweeper
+    max_batch_size: null
+    params: null
+  help:
+    app_name: ${hydra.job.name}
+    header: '${hydra.help.app_name} is powered by Hydra.
+
+      '
+    footer: 'Powered by Hydra (https://hydra.cc)
+
+      Use --hydra-help to view Hydra specific help
+
+      '
+    template: '${hydra.help.header}
+
+      == Configuration groups ==
+
+      Compose your configuration from those groups (group=option)
+
+
+      $APP_CONFIG_GROUPS
+
+
+      == Config ==
+
+      Override anything in the config (foo.bar=value)
+
+
+      $CONFIG
+
+
+      ${hydra.help.footer}
+
+      '
+  hydra_help:
+    template: 'Hydra (${hydra.runtime.version})
+
+      See https://hydra.cc for more info.
+
+
+      == Flags ==
+
+      $FLAGS_HELP
+
+
+      == Configuration groups ==
+
+      Compose your configuration from those groups (For example, append hydra/job_logging=disabled
+      to command line)
+
+
+      $HYDRA_CONFIG_GROUPS
+
+
+      Use ''--cfg hydra'' to Show the Hydra config.
+
+      '
+    hydra_help: ???
+  hydra_logging:
+    version: 1
+    formatters:
+      simple:
+        format: '[%(asctime)s][HYDRA] %(message)s'
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: simple
+        stream: ext://sys.stdout
+    root:
+      level: INFO
+      handlers:
+      - console
+    loggers:
+      logging_example:
+        level: DEBUG
+    disable_existing_loggers: false
+  job_logging:
+    version: 1
+    formatters:
+      simple:
+        format: '[%(asctime)s][%(name)s][%(levelname)s] - %(message)s'
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: simple
+        stream: ext://sys.stdout
+      file:
+        class: logging.FileHandler
+        formatter: simple
+        filename: ${hydra.runtime.output_dir}/${hydra.job.name}.log
+    root:
+      level: INFO
+      handlers:
+      - console
+      - file
+    disable_existing_loggers: false
+  env: {}
+  mode: RUN
+  searchpath: []
+  callbacks: {}
+  output_subdir: hydra
+  overrides:
+    hydra:
+    - hydra.mode=RUN
+    task:
+    - dataset=all
+    - dataset.train.batch_size=4
+    - dataset.train.num_workers=4
+    - dataset.train.prefetch_factor=4
+    - dataset.val.batch_size=4
+    - dataset.val.num_workers=4
+    - dataset.val.prefetch_factor=8
+    - dataset.min_audio_length=96000
+    - dataset.latent_hop_length=320
+    - dataset.timbre_rate_num=100
+    - dataset.timbre_perturb=False
+    - dataset.ref_segment_duration=6.0
+    - dataset.mls.dataset_id=parler-tts/mls_eng
+    - dataset.mls.train_split=train
+    - dataset.mls.streaming=False
+    - ++dataset.train.dynamic_batch=False
+    - ++dataset.drop_short_samples=False
+    - ++dataset.filter_min_audio_length=144000
+    - train.trainer.devices=4
+    - train.trainer.precision=32-true
+    - train.trainer.val_check_interval=10000
+    - ++train.trainer.check_val_every_n_epoch=1
+    - train.allow_tf32=False
+    - train.float32_matmul_precision=highest
+    - train.gradient_accumulation_steps=1
+    - ++train.manual_ddp_grad_average=True
+    - ++train.ddp_verify_grad_sync_steps=3
+    - train.lambdas.lambda_vq_loss=1
+    - train.num_pesq_processor=4
+    - train.use_torch_compile=False
+    - train.use_val_utmos=True
+    - ++train.preload_val_metric_models=False
+    - model.codec_encoder.use_hubert=True
+    - model.codec_encoder.freeze_hubert_encoder=True
+    - model.codec_encoder.hubert_model_name=facebook/hubert-large-ls960-ft
+    - model.codec_encoder.hubert_hidden_layers=[11,14,16]
+    - model.codec_encoder.hubert_hidden_mode=avg
+    - model.codec_encoder.hubert_ngf=1024
+    - model.codec_encoder.hubert_use_transformer=True
+    - model.codec_encoder.use_vqw2v_continuous=True
+    - model.codec_encoder.use_w2v2=False
+    - model.codec_encoder.freeze_w2v2_encoder=True
+    - model.codec_encoder.use_vqw2v=False
+    - model.codec_encoder.freeze_vqw2v_encoder=True
+    - model.codec_encoder.up_ratios=[2]
+    - model.codec_encoder.temporal.use=False
+    - model.codec_decoder.quantizer_type=fsq
+    - model.codec_decoder.codebook_size=6561
+    - model.codec_decoder.vq_commit_weight=0.25
+    - model.codec_decoder.up_ratios=[8,5,4,4]
+    - model.codec_decoder.speaker_condition=True
+    - model.codec_decoder.f0_condition=True
+    - model.codec_decoder.f0_speaker_condition=True
+    - model.codec_decoder.use_stage_speaker_film=False
+    - model.codec_decoder.use_mhca=True
+    - model.codec_decoder.mhca_num_heads=2
+    - model.codec_decoder.mhca_dropout=0.2
+    - ++model.codec_decoder.spk_cond.use=True
+    - ++model.codec_decoder.spk_cond.type=[mhca]
+    - ++model.codec_decoder.spk_cond.num_heads=2
+    - ++model.codec_decoder.spk_cond.dropout=0.2
+    - model.codec_decoder.temporal.use=True
+    - model.codec_decoder.temporal.type=lstm
+    - model.f0_codec.zero_out_all_unvoiced=False
+    - model.f0_codec.finetune_f0_extractor=False
+    - model.f0_codec.use_codec_structure=True
+    - model.f0_codec.encoder_activation_type=LeakyReLU
+    - model.f0_codec.encoder_leaky_relu_params.negative_slope=0.1
+    - model.f0_codec.decoder_activation_type=LeakyReLU
+    - model.f0_codec.decoder_leaky_relu_params.negative_slope=0.1
+    - model.f0_codec.upsample_extracted_f0=False
+    - model.f0_codec.encoder_up_ratios=[1,1,2,2]
+    - model.f0_codec.decoder_up_ratios=[2,2,1,1]
+    - model.f0_codec.encoder_ngf=32
+    - model.f0_codec.decoder_ngf=32
+    - model.f0_codec.decoder_use_mhca=True
+    - model.f0_codec.use_fcpe_loss=True
+    - model.f0_codec.fcpe_out_dims=360
+    - model.f0_codec.use_normalized_f0=True
+    - model.f0_codec.use_unnormf0_mse_loss=False
+    - model.speaker_encoder.speaker_encoder_type=wavlm
+    - model.speaker_encoder.token_num=128
+    - model.speaker_encoder.use_quantizer=False
+    - model.speaker_encoder.use_perceiver_encoder=True
+    - ++model.codec_decoder.fsq_levels=[3,3,3,3,3,3,3,3]
+    - ++model.codec_decoder.fsq_num_quantizers=1
+    - ++dataset.train_ref_clip_mode=nearby
+    - ++dataset.val.multiprocessing_context=spawn
+  job:
+    name: train
+    chdir: true
+    override_dirname: ++dataset.drop_short_samples=False,++dataset.filter_min_audio_length=144000,++dataset.train.dynamic_batch=False,++dataset.train_ref_clip_mode=nearby,++dataset.val.multiprocessing_context=spawn,++model.codec_decoder.fsq_levels=[3,3,3,3,3,3,3,3],++model.codec_decoder.fsq_num_quantizers=1,++model.codec_decoder.spk_cond.dropout=0.2,++model.codec_decoder.spk_cond.num_heads=2,++model.codec_decoder.spk_cond.type=[mhca],++model.codec_decoder.spk_cond.use=True,++train.ddp_verify_grad_sync_steps=3,++train.manual_ddp_grad_average=True,++train.preload_val_metric_models=False,++train.trainer.check_val_every_n_epoch=1,dataset.latent_hop_length=320,dataset.min_audio_length=96000,dataset.mls.dataset_id=parler-tts/mls_eng,dataset.mls.streaming=False,dataset.mls.train_split=train,dataset.ref_segment_duration=6.0,dataset.timbre_perturb=False,dataset.timbre_rate_num=100,dataset.train.batch_size=4,dataset.train.num_workers=4,dataset.train.prefetch_factor=4,dataset.val.batch_size=4,dataset.val.num_workers=4,dataset.val.prefetch_factor=8,dataset=all,model.codec_decoder.codebook_size=6561,model.codec_decoder.f0_condition=True,model.codec_decoder.f0_speaker_condition=True,model.codec_decoder.mhca_dropout=0.2,model.codec_decoder.mhca_num_heads=2,model.codec_decoder.quantizer_type=fsq,model.codec_decoder.speaker_condition=True,model.codec_decoder.temporal.type=lstm,model.codec_decoder.temporal.use=True,model.codec_decoder.up_ratios=[8,5,4,4],model.codec_decoder.use_mhca=True,model.codec_decoder.use_stage_speaker_film=False,model.codec_decoder.vq_commit_weight=0.25,model.codec_encoder.freeze_hubert_encoder=True,model.codec_encoder.freeze_vqw2v_encoder=True,model.codec_encoder.freeze_w2v2_encoder=True,model.codec_encoder.hubert_hidden_layers=[11,14,16],model.codec_encoder.hubert_hidden_mode=avg,model.codec_encoder.hubert_model_name=facebook/hubert-large-ls960-ft,model.codec_encoder.hubert_ngf=1024,model.codec_encoder.hubert_use_transformer=True,model.codec_encoder.temporal.use=False,model.codec_encoder.up_ratios=[2],model.codec_encoder.use_hubert=True,model.codec_encoder.use_vqw2v=False,model.codec_encoder.use_vqw2v_continuous=True,model.codec_encoder.use_w2v2=False,model.f0_codec.decoder_activation_type=LeakyReLU,model.f0_codec.decoder_leaky_relu_params.negative_slope=0.1,model.f0_codec.decoder_ngf=32,model.f0_codec.decoder_up_ratios=[2,2,1,1],model.f0_codec.decoder_use_mhca=True,model.f0_codec.encoder_activation_type=LeakyReLU,model.f0_codec.encoder_leaky_relu_params.negative_slope=0.1,model.f0_codec.encoder_ngf=32,model.f0_codec.encoder_up_ratios=[1,1,2,2],model.f0_codec.fcpe_out_dims=360,model.f0_codec.finetune_f0_extractor=False,model.f0_codec.upsample_extracted_f0=False,model.f0_codec.use_codec_structure=True,model.f0_codec.use_fcpe_loss=True,model.f0_codec.use_normalized_f0=True,model.f0_codec.use_unnormf0_mse_loss=False,model.f0_codec.zero_out_all_unvoiced=False,model.speaker_encoder.speaker_encoder_type=wavlm,model.speaker_encoder.token_num=128,model.speaker_encoder.use_perceiver_encoder=True,model.speaker_encoder.use_quantizer=False,train.allow_tf32=False,train.float32_matmul_precision=highest,train.gradient_accumulation_steps=1,train.lambdas.lambda_vq_loss=1,train.num_pesq_processor=4,train.trainer.devices=4,train.trainer.precision=32-true,train.trainer.val_check_interval=10000,train.use_torch_compile=False,train.use_val_utmos=True
+    id: ???
+    num: ???
+    config_name: hubert_enc_16kHz_trixbase
+    env_set: {}
+    env_copy: []
+    config:
+      override_dirname:
+        kv_sep: '='
+        item_sep: ','
+        exclude_keys: []
+  runtime:
+    version: 1.3.2
+    version_base: '1.3'
+    cwd: /home/hounsu/voice/bigcodec
+    config_sources:
+    - path: hydra.conf
+      schema: pkg
+      provider: hydra
+    - path: /home/hounsu/voice/bigcodec/config
+      schema: file
+      provider: main
+    - path: ''
+      schema: structured
+      provider: schema
+    output_dir: /home/hounsu/voice/bigcodec/outputs/2026-05-23/18-03-54
+    choices:
+      train: default
+      model: hubert_enc_16kHz_trixbase
+      dataset: all
+      preprocess: vqw2v_enc_16kHz
+      hydra/env: default
+      hydra/callbacks: null
+      hydra/job_logging: default
+      hydra/hydra_logging: default
+      hydra/hydra_help: default
+      hydra/help: default
+      hydra/sweeper: basic
+      hydra/launcher: basic
+      hydra/output: default
+  verbose: false

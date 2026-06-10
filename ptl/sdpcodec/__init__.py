@@ -1,1 +1,1 @@
-"""Legacy joint content-F0 Lightning implementation used by SDPCodec."""
+"""Joint content-F0 Lightning implementation used by SDPCodec."""
