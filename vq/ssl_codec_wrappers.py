@@ -1,5 +1,5 @@
 """
-Shared SSL (Self-Supervised Learning) codec encoder wrappers for BiCodec, TriCodec, TriXCodec.
+Shared SSL (Self-Supervised Learning) codec encoder wrappers for BiCodec, TriCodec, SdpCodec.
 
 Provides:
 - W2V2HiddenStateEncoder, W2VBert2HiddenStateEncoder: HuggingFace SSL encoder adapters

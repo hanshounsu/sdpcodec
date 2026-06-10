@@ -421,7 +421,7 @@ class MlsStreamingTrainDataset(IterableDataset):
             yield {
                 "fid": fid,
                 "wav": target_wav,
-                # Keep schema compatible with non-streaming BigCodec/TriXCodec batches
+                # Keep schema compatible with non-streaming BigCodec/SdpCodec batches
                 # (the model accesses this key unconditionally).
                 "wav_24k": None,
                 "ref_wav": target_wav,
@@ -1165,7 +1165,7 @@ def load_vctk_splits(cfg, dc, *, load_train: bool, load_val: bool, load_test: bo
 
 
 def _optimizer_steps_from_checkpoint(ckpt: dict) -> int:
-    """Optimizer update count for resume (TriXCodec manual opt uses total_step, not global_step)."""
+    """Optimizer update count for resume (SdpCodec manual opt uses total_step, not global_step)."""
     state = ckpt.get("state_dict") or {}
     for key, value in state.items():
         if key == "total_step" or key.endswith(".total_step"):
@@ -2053,7 +2053,7 @@ class FSDataset(Dataset):
 
         is_24k = int(self.sr) == 24000
 
-        # 24k -> 16k 보조 함수 (TriXCodec speaker/SSL branches expect 16k)
+        # 24k -> 16k 보조 함수 (SdpCodec speaker/SSL branches expect 16k)
         def to16k(x: torch.Tensor) -> torch.Tensor:
             if not is_24k:
                 return x.clamp(-1.0, 1.0)

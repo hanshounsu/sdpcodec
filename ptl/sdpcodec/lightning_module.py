@@ -116,13 +116,13 @@ def _set_s3prl_download_dir(cache_dir: str) -> None:
         print(colored(f"Warning: failed to set s3prl download dir: {exc}", "yellow"))
 
 
-class TriXCodecLightningModule(pl.LightningModule):
+class SdpCodecLightningModule(pl.LightningModule):
     """
-    TriXCodec: Neural Codec with Joint Content-F0 Quantization
+    SdpCodec: Neural Codec with Joint Content-F0 Quantization
     
     Architecture Overview:
     ----------------------
-    Unlike TriCodec which quantizes content and F0 separately, TriXCodec performs
+    Unlike TriCodec which quantizes content and F0 separately, SdpCodec performs
     joint quantization of content and F0 features through the following pipeline:
     
     1. Content Encoding:    wav → CodecEncoder → vq_emb (B, C, T)
@@ -137,7 +137,7 @@ class TriXCodecLightningModule(pl.LightningModule):
     Key Differences from TriCodec:
     ------------------------------
     - TriCodec:  Separate VQ for content and F0
-    - TriXCodec: Joint VQ with projection layers (joint_mixer, joint_to_audio_f0)
+    - SdpCodec: Joint VQ with projection layers (joint_mixer, joint_to_audio_f0)
     - Benefit:   Single codebook for both content and F0, potentially better
                  capturing of content-F0 correlations
     
@@ -1341,7 +1341,7 @@ class TriXCodecLightningModule(pl.LightningModule):
                 use_san=use_bigvsan,
             )
 
-        # TriXCodec: joint quantization of content and F0
+        # SdpCodec: joint quantization of content and F0
         if use_codec_structure:
             # F0CodecEncoder: use encoder_out_channels (auto-calculated or specified)
             f0_dim = encoder_out_channels
@@ -1359,7 +1359,7 @@ class TriXCodecLightningModule(pl.LightningModule):
         # Project quantized features back to disentangled dimensions
         joint_to_audio_f0 = nn.Conv1d(deccfg.vq_dim, joint_disentangle_dim, kernel_size=1)
         
-        print(colored(f"TriXCodec: joint_in_dim={joint_in_dim}, vq_dim={deccfg.vq_dim}, joint_out_dim={joint_disentangle_dim}", "red", attrs=['bold']))
+        print(colored(f"SdpCodec: joint_in_dim={joint_in_dim}, vq_dim={deccfg.vq_dim}, joint_out_dim={joint_disentangle_dim}", "red", attrs=['bold']))
         print(colored(f"  - content dim: {enccfg.out_channels} → {deccfg.in_channels}", "cyan", attrs=['bold']))
         print(colored(f"  - f0 dim: {f0_dim} → {f0_dec_dim}", "blue", attrs=['bold']))
         print(colored(f"  - F0 codec structure: {'CodecEncoder/Decoder' if use_codec_structure else 'Original F0Encoder/Decoder'}", "yellow"))
@@ -1855,7 +1855,7 @@ class TriXCodecLightningModule(pl.LightningModule):
                     )
                     print(colored("  ✓ F0 decoder compiled", "green"))
                 
-                # TriXCodec specific - simple Conv1d layers
+                # SdpCodec specific - simple Conv1d layers
                 if 'joint_mixer' in self.model:
                     self.model['joint_mixer'] = torch.compile(
                         self.model['joint_mixer'], mode=compile_mode
@@ -2492,7 +2492,7 @@ class TriXCodecLightningModule(pl.LightningModule):
             spk_cond = spk_cond_vec
 
         # ============================================================
-        # TriXCodec Pipeline:
+        # SdpCodec Pipeline:
         # 1. Extract and encode F0
         # 2. Concatenate content (vq_emb) and F0 embeddings
         # 3. Project to VQ dimension and jointly quantize
@@ -2668,7 +2668,7 @@ class TriXCodecLightningModule(pl.LightningModule):
 
             'gt_f0_vuv': gt_f0_vuv,
             'gen_f0_vuv': gen_f0_vuv_output,  # GT in FCPE mode, predicted in normal mode
-            'f0_vq_loss': None,  # TriXCodec: no separate F0 VQ loss (joint quantization)
+            'f0_vq_loss': None,  # SdpCodec: no separate F0 VQ loss (joint quantization)
             'f0_fcpe_latent': f0_fcpe_latent,  # FCPE-style latent (B, 360, T) or None
             'f0_fcpe_logits': f0_fcpe_logits,  # Pre-sigmoid FCPE logits for stable BCEWithLogits loss
             'gt_fcpe_latent': gt_fcpe_latent,
@@ -2680,7 +2680,7 @@ class TriXCodecLightningModule(pl.LightningModule):
     
     def tokenizer(self, batch):
         """
-        TriXCodec tokenizer: produces joint tokens from content and F0.
+        SdpCodec tokenizer: produces joint tokens from content and F0.
         """
         spk_type = getattr(self.cfg.model.speaker_encoder, 'speaker_encoder_type', 'ecapa_tdnn')
         if spk_type == 'wavlm':
@@ -2740,7 +2740,7 @@ class TriXCodecLightningModule(pl.LightningModule):
 
         return {
             'global_tokens': global_tokens,
-            'semantic_tokens': vq_code  # TriXCodec: joint content+F0 tokens
+            'semantic_tokens': vq_code  # SdpCodec: joint content+F0 tokens
         }
 
     def compute_disc_loss(self, batch, output):
@@ -2949,7 +2949,7 @@ class TriXCodecLightningModule(pl.LightningModule):
         else:
             loss_dict['xd_loss'] = torch.tensor(0., device=self.device)
         
-        # f0 VQ loss (TriXCodec: None, as F0 is jointly quantized with content)
+        # f0 VQ loss (SdpCodec: None, as F0 is jointly quantized with content)
         if f0_vq_loss is not None:
             if isinstance(f0_vq_loss, list):
                 f0_vq_loss = sum(f0_vq_loss)
@@ -2959,7 +2959,7 @@ class TriXCodecLightningModule(pl.LightningModule):
             f0_vq_loss = self.cfg.train.lambdas.lambda_f0_vq_loss * f0_vq_loss
             gen_loss = gen_loss + f0_vq_loss
         else:
-            # TriXCodec: no separate F0 VQ loss
+            # SdpCodec: no separate F0 VQ loss
             loss_dict['f0_vq_loss'] = torch.tensor(0.0, device=self.device)
 
         # print('gen f0 max min', torch.max(f0_vuv_.select(1, 0)).item(), torch.min(f0_vuv_.select(1, 0)).item())
@@ -4590,14 +4590,14 @@ class TriXCodecLightningModule(pl.LightningModule):
         disc_param_groups = [module.parameters() for _, module in self._iter_discriminator_modules()]
         disc_params = chain(*disc_param_groups)
         
-        # TriXCodec: include joint_mixer and joint_to_audio_f0 in generator params
+        # SdpCodec: include joint_mixer and joint_to_audio_f0 in generator params
         gen_params_list = [
             self.model['CodecEnc'].parameters(),
             self.model['generator'].parameters(),
             self.model['speaker_encoder'].parameters(),
             self.model['f0_encoder'].parameters(),
             self.model['f0_decoder'].parameters(),
-            self.model['joint_mixer'].parameters(),  # TriXCodec: joint projection layers
+            self.model['joint_mixer'].parameters(),  # SdpCodec: joint projection layers
             self.model['joint_to_audio_f0'].parameters(),
         ]
 

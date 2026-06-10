@@ -12,13 +12,13 @@ RVQ continuation, not the stale saved Hydra config.
 
 ```bash
 cd /home/hounsu/voice/sdpcodec
-python3 -m sdpcodec.train
+./scripts/train_default.sh
 ```
 
 Useful local overrides:
 
 ```bash
-python3 -m sdpcodec.train train.wandb_enabled=false train.trainer.devices=1 train.trainer.max_steps=10
+./scripts/train_default.sh train.wandb_enabled=false train.trainer.devices=1 train.trainer.max_steps=10
 ```
 
 ## Public Names

@@ -6,10 +6,10 @@ from sdpcodec._compat import ensure_legacy_import_paths
 
 ensure_legacy_import_paths()
 
-from ptl.trixcodec.lightning_module import TriXCodecLightningModule
+from ptl.sdpcodec.lightning_module import SdpCodecLightningModule as _CoreSdpCodecLightningModule
 
 
-class SdpCodecLightningModule(TriXCodecLightningModule):
+class SdpCodecLightningModule(_CoreSdpCodecLightningModule):
     """Joint content/F0 codec system used by the SDPCodec baseline."""
 
 
