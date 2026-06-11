@@ -35,4 +35,4 @@ model:
 
 train:
   wandb_project: BigCodec
-  wandb_name: sddpcodec/hubert/MLS+LS/25Hz/rvq6561/nearbyrefclip/b4ddp2acc2/train6s/val6s/durfree/flexi/dynthr085-100/evalthr090/localattn16/maxspan16/gtdur
+  wandb_name: sddpcodec/hubert/MLS+LS/25Hz/rvq6561/nearbyrefclip/wavlm_nopos/no_posconv_no_relpos/b4ddp2acc2/train6s/val6s/durfree/flexi/dynthr085-100/evalthr090/localattn16/maxspan16/gtdur

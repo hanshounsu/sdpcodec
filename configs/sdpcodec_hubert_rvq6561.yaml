@@ -141,6 +141,8 @@ model:
     perceiver_use_flash_attn: true
     norm_layer: bn
     wavlm_checkpoint: /home/hounsu/voice/sdpcodec/pretrained_models/wavlm/WavLM-Large.pt
+    wavlm_disable_pos_conv: true
+    wavlm_disable_relative_position_bias: true
     quantizer:
       type: none
       fsq:
@@ -301,7 +303,7 @@ train:
   wandb_enabled: true
   wandb_offline: false
   wandb_project: SDPCodec
-  wandb_name: sdpcodec/hubert/MLS+LS/25Hz/rvq6561/nearbyrefclip/b4ddp4acc1/train6s/val6s
+  wandb_name: sdpcodec/hubert/MLS+LS/25Hz/rvq6561/nearbyrefclip/wavlm_nopos/no_posconv_no_relpos/b4ddp4acc1/train6s/val6s
   wandb_append_timestamp: true
   use_val_utmos: true
   use_val_wavlm: true
