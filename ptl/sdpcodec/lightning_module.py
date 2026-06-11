@@ -4332,7 +4332,8 @@ class SdpCodecLightningModule(pl.LightningModule):
         duration_segments = output.get('duration_segments')
         if isinstance(duration_segments, list) and duration_segments:
             sample['duration_segments'] = duration_segments[0]
-            sample['duration_frame_count'] = int(output['vq_post_emb'].shape[-1])
+            if duration_segments[0]:
+                sample['duration_frame_count'] = max(int(end) for _, end in duration_segments[0])
         self.val_step_plot_outputs.append(sample)
 
     def _transcribe_hubert(self, audio_16k: torch.Tensor) -> str:

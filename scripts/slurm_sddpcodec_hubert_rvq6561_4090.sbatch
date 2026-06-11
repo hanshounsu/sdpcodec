@@ -32,7 +32,11 @@ VAL_CHECK_INTERVAL="${VAL_CHECK_INTERVAL:-10000}"
 NUM_SANITY_VAL_STEPS="${NUM_SANITY_VAL_STEPS:-9}"
 RUN_DEBUG="${RUN_DEBUG:-True}"
 DEBUG_TRAIN_STEPS="${DEBUG_TRAIN_STEPS:-2}"
+DEBUG_MAX_STEPS="${DEBUG_MAX_STEPS:-${DEBUG_TRAIN_STEPS}}"
+DEBUG_VAL_CHECK_INTERVAL="${DEBUG_VAL_CHECK_INTERVAL:-1}"
 DEBUG_VAL_BATCHES="${DEBUG_VAL_BATCHES:-1}"
+DEBUG_SANITY_VAL_STEPS="${DEBUG_SANITY_VAL_STEPS:-0}"
+DEBUG_DATASET_NAME="${DEBUG_DATASET_NAME:-librispeech}"
 RUN_HASH="${RUN_HASH:-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')}"
 RUN_STAMP="${RUN_STAMP:-$(date +%F-%H-%M-%S)-${RUN_HASH}}"
 HYDRA_RUN_DIR="${HYDRA_RUN_DIR:-${OUTPUT_ROOT}/${RUN_STAMP}}"
@@ -87,7 +91,7 @@ ARGS=(
   hydra.job.chdir=True
   log_dir=pl_log
   train.trainer.devices="${GPUS}"
-  train.trainer.accumulate_grad_batches="${GRAD_ACCUM}"
+  train.trainer.accumulate_grad_batches=1
   train.gradient_accumulation_steps="${GRAD_ACCUM}"
   train.trainer.val_check_interval="${VAL_CHECK_INTERVAL}"
   train.trainer.num_sanity_val_steps="${NUM_SANITY_VAL_STEPS}"
@@ -102,11 +106,29 @@ if [[ -n "${EXTRA_OVERRIDES}" ]]; then
 fi
 
 echo "[run] repo=${REPO_ROOT}"
+echo "[run] git=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+echo "[run] docker_image=${DOCKER_IMAGE}"
 echo "[run] config=${CONFIG_NAME}"
 echo "[run] hydra_run_dir=${HYDRA_RUN_DIR}"
+echo "[run] slurm_log_root=${SLURM_LOG_ROOT}"
+echo "[run] torch_home=${TORCH_HOME}"
+echo "[run] s3prl_cache_root=${S3PRL_CACHE_ROOT}"
 echo "[run] gpus=${GPUS}"
 echo "[run] global_batch=$((GPUS * PER_DEVICE_BATCH * GRAD_ACCUM)) (${GPUS} x ${PER_DEVICE_BATCH} x ${GRAD_ACCUM})"
+echo "[run] docker_gpus=${DOCKER_GPU_ARGS[*]}"
 echo "[run] run_debug=${RUN_DEBUG}"
+echo "[run] debug_dataset_name=${DEBUG_DATASET_NAME}"
+echo "[run] debug_train_steps=${DEBUG_TRAIN_STEPS}"
+echo "[run] debug_max_steps=${DEBUG_MAX_STEPS}"
+echo "[run] debug_val_check_interval=${DEBUG_VAL_CHECK_INTERVAL}"
+echo "[run] debug_val_batches=${DEBUG_VAL_BATCHES}"
+echo "[run] extra_overrides=${EXTRA_OVERRIDES:-none}"
+
+docker image inspect "${DOCKER_IMAGE}" >/dev/null
+docker run --rm --user "${UID_GID}" -e HOME=/home/hounsu \
+  -v /home/hounsu:/home/hounsu -v /data:/data -w "${REPO_ROOT}" \
+  "${DOCKER_IMAGE}" "${PYTHON_BIN}" -c \
+  "import torch, pytorch_lightning, hydra, datasets; print('env ok', torch.__version__)"
 
 run_train() {
   local phase="$1"
@@ -144,29 +166,45 @@ run_train() {
 
 verify_debug_log() {
   local log_path="${SLURM_LOG_ROOT}/${SLURM_JOB_NAME:-sddpcodec_hu_rvq6561}-${SLURM_JOB_ID}.out"
-  grep -Eq 'Validation:' "${log_path}" || { echo "[debug] validation did not run" >&2; exit 2; }
-  grep -Eq 'UTMOS torch.hub cache|Loading UTMOS predictor|val_stats/utmos' "${log_path}" || { echo "[debug] UTMOS was not exercised" >&2; exit 2; }
-  grep -Eq 'Loading WavLM_large model|val_stats/wavlm|WavLM validation' "${log_path}" || { echo "[debug] WavLM was not exercised" >&2; exit 2; }
-  ! grep -Eq 'Traceback|RuntimeError|PermissionError|CUDA out of memory|Bus error|SIGBUS|Warning: disabling UTMOS' "${log_path}" || { echo "[debug] fatal pattern found" >&2; exit 2; }
+  if [[ ! -f "${log_path}" ]]; then
+    echo "[debug] cannot verify log; missing ${log_path}" >&2
+    exit 2
+  fi
+  if grep -Eq 'Traceback|RuntimeError|PermissionError|Error executing job|CUDA out of memory|Bus error|SIGBUS|Warning: disabling UTMOS' "${log_path}"; then
+    echo "[debug] fatal/error pattern found in ${log_path}; refusing main training" >&2
+    exit 2
+  fi
+  if ! grep -Eq 'Validation:' "${log_path}"; then
+    echo "[debug] non-sanity validation did not run; refusing main training" >&2
+    exit 2
+  fi
+  if ! grep -Eq 'UTMOS torch.hub cache|Loading UTMOS predictor|val_stats/utmos' "${log_path}"; then
+    echo "[debug] UTMOS validation metric was not exercised; refusing main training" >&2
+    exit 2
+  fi
+  if ! grep -Eq 'Loading WavLM_large model|val_stats/wavlm|WavLM validation' "${log_path}"; then
+    echo "[debug] WavLM validation metric was not exercised; refusing main training" >&2
+    exit 2
+  fi
 }
 
 if [[ "${RUN_DEBUG}" == "True" ]]; then
   DEBUG_RUN_DIR="${HYDRA_RUN_DIR}-debug${DEBUG_TRAIN_STEPS}train-${DEBUG_VAL_BATCHES}val"
+  echo "[debug] starting ${DEBUG_TRAIN_STEPS} train steps then ${DEBUG_VAL_BATCHES} val batch on dataset=${DEBUG_DATASET_NAME}"
+  echo "[debug] hydra_run_dir=${DEBUG_RUN_DIR}"
   DEBUG_ARGS=(
     "${ARGS[@]}"
     hydra.run.dir="${DEBUG_RUN_DIR}"
-    dataset.name=librispeech
-    train.trainer.max_steps="${DEBUG_TRAIN_STEPS}"
-    train.trainer.val_check_interval=1
+    dataset.name="${DEBUG_DATASET_NAME}"
+    train.trainer.max_steps="${DEBUG_MAX_STEPS}"
+    train.trainer.val_check_interval="${DEBUG_VAL_CHECK_INTERVAL}"
     train.trainer.limit_val_batches="${DEBUG_VAL_BATCHES}"
-    train.trainer.num_sanity_val_steps=0
-    ++train.trainer.enable_checkpointing=False
+    train.trainer.num_sanity_val_steps="${DEBUG_SANITY_VAL_STEPS}"
     train.wandb_enabled=False
   )
-  echo "[debug] ${DEBUG_TRAIN_STEPS} train steps, ${DEBUG_VAL_BATCHES} val batch, dataset=librispeech"
   run_train debug "${DEBUG_ARGS[@]}"
   verify_debug_log
-  echo "[debug] passed; starting main"
+  echo "[debug] passed; starting main training"
 fi
 
 run_train main "${ARGS[@]}"
