@@ -25,6 +25,19 @@
   CPU = `16 x GPU count`, RAM = `26G x GPU count`.
 - For example, a 2-GPU job should request `--cpus-per-task=32` and
   `--mem=52G`.
+- Never launch, submit, resume, restart, or otherwise start any experiment
+  unless the user explicitly asks to run that exact action in the current
+  conversation. Editing configs/scripts, answering questions, checking status,
+  or discussing settings is not permission to run.
+- Never cancel, stop, replace, requeue, preempt, or otherwise interrupt an
+  existing experiment unless the user explicitly asks to stop that exact job.
+  This is stricter than ordinary debugging convenience: do not cancel a run in
+  order to apply a config change, even if the current run is wrong, unless the
+  user says to cancel it.
+- If a requested resume has no valid checkpoint, state that exact resume is not
+  possible and list the checked paths. Do not relaunch from scratch, reuse a
+  debug checkpoint, or submit a "closest" replacement unless the user explicitly
+  approves that fallback.
 - Every fresh SLURM training experiment must run mandatory debug before main
   training. This is not optional agent discretion. Debug must execute the
   smallest practical train+val path: a few train steps, one or a few
