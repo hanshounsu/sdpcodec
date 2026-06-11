@@ -1796,26 +1796,21 @@ class FSDataset(Dataset):
             self.train_ref_clip_mode = "target"
         if self.train_ref_clip_mode in {"near", "nearby_nonoverlap", "nearby_non_overlap"}:
             self.train_ref_clip_mode = "nearby"
-        valid_ref_modes = {"random", "target", "nearby"}
+        if self.train_ref_clip_mode in {"same_context", "target_context_ref", "target_inclusive"}:
+            self.train_ref_clip_mode = "target_context"
+        valid_ref_modes = {"random", "target", "nearby", "target_context"}
         if self.train_ref_clip_mode not in valid_ref_modes:
             raise ValueError(
                 f"Unsupported dataset.train_ref_clip_mode={configured_ref_mode!r}; "
                 f"expected one of {sorted(valid_ref_modes)}"
             )
-        spk_cfg = cfg.model.get("speaker_encoder", {})
-        self.wavlm_no_pos_ref_clip = bool(spk_cfg.get("wavlm_disable_pos_conv", False)) and bool(
-            spk_cfg.get("wavlm_disable_relative_position_bias", False)
-        )
         self.skip_ref_clip_train = self.phase == "train" and self.train_ref_clip_mode == "target"
         if self.skip_ref_clip_train:
             assert cfg.preprocess.audio.sr == 16000, "Only 16kHz is supported for skipping ref-clip in train"
         if self.phase == "train":
-            ref_mode_for_log = self.train_ref_clip_mode
-            if self.train_ref_clip_mode == "nearby" and self.wavlm_no_pos_ref_clip:
-                ref_mode_for_log = "target_context"
             print(
                 colored(
-                    f"Train reference clip mode for {self.dataset_name}: {ref_mode_for_log}",
+                    f"Train reference clip mode for {self.dataset_name}: {self.train_ref_clip_mode}",
                     "green",
                     attrs=['bold'],
                 )
@@ -1947,17 +1942,7 @@ class FSDataset(Dataset):
         elif right.numel() > 0:
             ref = right[:ref_len]
         else:
-            spk_cfg = self.cfg.model.get("speaker_encoder", {})
-            allow_target_fallback = bool(spk_cfg.get("wavlm_disable_pos_conv", False)) and bool(
-                spk_cfg.get("wavlm_disable_relative_position_bias", False)
-            )
-            if not allow_target_fallback:
-                # No non-overlapping context exists. Keep the old behavior unless
-                # the WavLM speaker branch is explicitly configured as no-pos.
-                return wav.new_zeros(ref_len)
-            ref = wav[target_start:target_end]
-            if ref.numel() <= 0:
-                return wav.new_zeros(ref_len)
+            return wav.new_zeros(ref_len)
 
         if ref.shape[0] < ref_len:
             reps = (ref_len + ref.shape[0] - 1) // ref.shape[0]
@@ -2158,10 +2143,10 @@ class FSDataset(Dataset):
                 # use target segment itself as reference to remove ref-clip variance.
                 ref_wav_16k = target_wav
             elif self.phase == 'train' and self.train_ref_clip_mode == "nearby":
-                if self.wavlm_no_pos_ref_clip:
-                    ref_wav = self.get_target_context_ref_clip(full_wav, start, end)
-                else:
-                    ref_wav = self.get_nearby_ref_clip(full_wav, start, end)
+                ref_wav = self.get_nearby_ref_clip(full_wav, start, end)
+                ref_wav_16k = to16k(ref_wav) if is_24k else ref_wav
+            elif self.phase == 'train' and self.train_ref_clip_mode == "target_context":
+                ref_wav = self.get_target_context_ref_clip(full_wav, start, end)
                 ref_wav_16k = to16k(ref_wav) if is_24k else ref_wav
             else:
                 ref_wav = self.get_ref_clip(full_wav, start, end, use_full)

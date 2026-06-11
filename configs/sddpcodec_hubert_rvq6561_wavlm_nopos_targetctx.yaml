@@ -1,0 +1,14 @@
+defaults:
+  - sddpcodec_hubert_rvq6561
+  - _self_
+
+dataset:
+  train_ref_clip_mode: target_context
+
+model:
+  speaker_encoder:
+    wavlm_disable_pos_conv: true
+    wavlm_disable_relative_position_bias: true
+
+train:
+  wandb_name: sddpcodec/hubert/MLS+LS/25Hz/rvq6561/targetctxrefclip/wavlm_nopos/no_posconv_no_relpos/b4ddp2acc2/train6s/val6s/durfree/flexi/dynthr085-100/evalthr090/localattn16/maxspan16/gtdur
