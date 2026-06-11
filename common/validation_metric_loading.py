@@ -110,7 +110,14 @@ SPEECHMOS_REPO_CACHE_NAME = "tarepan_SpeechMOS_v1.2.0"
 
 
 def speechmos_repo_cache_dir(torch_home: str) -> str:
-    return os.path.join(torch_home, "hub", SPEECHMOS_REPO_CACHE_NAME)
+    repo_dirs = [
+        os.path.join(torch_home, SPEECHMOS_REPO_CACHE_NAME),
+        os.path.join(torch_home, "hub", SPEECHMOS_REPO_CACHE_NAME),
+    ]
+    for repo_dir in repo_dirs:
+        if os.path.isdir(repo_dir):
+            return repo_dir
+    return repo_dirs[0]
 
 
 def speechmos_hubconf_path(torch_home: str) -> str:
