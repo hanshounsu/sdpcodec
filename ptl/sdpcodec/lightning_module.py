@@ -105,6 +105,60 @@ def _debug_tensor_stats(x):
         return stats
 
 
+class _LocalSelfAttention1d(nn.Module):
+    def __init__(self, dim, num_heads=8, num_layers=1, window=16, dropout=0.0, ffn_mult=4.0):
+        super().__init__()
+        self.window = int(window)
+        hidden = max(int(dim), int(round(float(dim) * float(ffn_mult))))
+        self.layers = nn.ModuleList([
+            nn.ModuleDict({
+                "norm_attn": nn.LayerNorm(dim),
+                "attn": nn.MultiheadAttention(
+                    embed_dim=int(dim),
+                    num_heads=max(1, int(num_heads)),
+                    dropout=float(dropout),
+                    batch_first=True,
+                ),
+                "norm_ffn": nn.LayerNorm(dim),
+                "ffn": nn.Sequential(
+                    nn.Linear(int(dim), hidden),
+                    nn.GELU(),
+                    nn.Dropout(float(dropout)),
+                    nn.Linear(hidden, int(dim)),
+                    nn.Dropout(float(dropout)),
+                ),
+            })
+            for _ in range(max(0, int(num_layers)))
+        ])
+
+    def _attention_mask(self, length, device):
+        if self.window <= 0 or length <= 1:
+            return None
+        idx = torch.arange(length, device=device)
+        return (idx[:, None] - idx[None, :]).abs() > self.window
+
+    def forward(self, x):
+        if len(self.layers) == 0 or x.numel() == 0:
+            return x
+        y = x.transpose(1, 2)
+        attn_mask = self._attention_mask(y.shape[1], y.device)
+        for layer in self.layers:
+            z = layer["norm_attn"](y)
+            attn_out, _ = layer["attn"](z, z, z, attn_mask=attn_mask, need_weights=False)
+            y = y + attn_out
+            y = y + layer["ffn"](layer["norm_ffn"](y))
+        return y.transpose(1, 2)
+
+
+class _MaskFillToken(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.token = nn.Parameter(torch.zeros(1, int(dim), 1))
+
+    def forward(self, batch_size, length, device, dtype):
+        return self.token.to(device=device, dtype=dtype).expand(int(batch_size), -1, int(length))
+
+
 def _set_s3prl_download_dir(cache_dir: str) -> None:
     os.makedirs(cache_dir, exist_ok=True)
     os.environ["S3PRL_CACHE_ROOT"] = cache_dir
@@ -1375,6 +1429,28 @@ class SdpCodecLightningModule(pl.LightningModule):
                     'joint_mixer': joint_mixer,
                     'joint_to_audio_f0': joint_to_audio_f0,
         })
+        dur_cfg = self.cfg.model.get('duration_codec', {})
+        if bool(dur_cfg.get('enabled', False)):
+            if bool(dur_cfg.get('local_attention_enabled', False)):
+                model['duration_local_attention'] = _LocalSelfAttention1d(
+                    deccfg.vq_dim,
+                    num_heads=dur_cfg.get('local_attention_heads', 8),
+                    num_layers=dur_cfg.get('local_attention_layers', 1),
+                    window=dur_cfg.get('local_attention_window', 16),
+                    dropout=dur_cfg.get('local_attention_dropout', 0.0),
+                    ffn_mult=dur_cfg.get('local_attention_ffn_mult', 4.0),
+                )
+            if bool(dur_cfg.get('mask_fill_enabled', True)):
+                model['duration_mask_fill'] = _MaskFillToken(deccfg.vq_dim)
+            if bool(dur_cfg.get('local_unmerge_attention_enabled', False)):
+                model['duration_unmerge_attention'] = _LocalSelfAttention1d(
+                    deccfg.vq_dim,
+                    num_heads=dur_cfg.get('local_unmerge_attention_heads', dur_cfg.get('local_attention_heads', 8)),
+                    num_layers=dur_cfg.get('local_unmerge_attention_layers', 1),
+                    window=dur_cfg.get('local_unmerge_attention_window', dur_cfg.get('local_attention_window', 16)),
+                    dropout=dur_cfg.get('local_unmerge_attention_dropout', 0.0),
+                    ffn_mult=dur_cfg.get('local_unmerge_attention_ffn_mult', 4.0),
+                )
         if spec_disc is not None:
             model['spec_discriminator'] = spec_disc
         for name, disc in extra_spec_discs.items():
@@ -2384,6 +2460,255 @@ class SdpCodecLightningModule(pl.LightningModule):
         return f0
 
     # @autocast(device_type='cuda', enabled=False)
+    def _duration_enabled(self):
+        return bool(self.cfg.model.get('duration_codec', {}).get('enabled', False))
+
+    def _duration_boundary_feature(self, vq_emb, z_f0, batch_idx):
+        dur_cfg = self.cfg.model.duration_codec
+        source = str(dur_cfg.get('boundary_feature_source', 'content')).replace('-', '_').lower()
+        content = vq_emb[batch_idx]
+        f0 = z_f0[batch_idx]
+        if f0.shape[-1] != content.shape[-1]:
+            f0 = F.interpolate(f0.unsqueeze(0), size=content.shape[-1], mode='nearest').squeeze(0)
+        if source in {'content', 'hubert', 'vq', 'vq_emb'}:
+            return content
+        if source in {'f0', 'pitch'}:
+            return f0
+        if source in {'content_f0', 'hubert_f0', 'concat'}:
+            return torch.cat([F.normalize(content.detach().float(), dim=0), F.normalize(f0.detach().float(), dim=0)], dim=0)
+        raise ValueError(f"Unsupported model.duration_codec.boundary_feature_source={source!r}")
+
+    def _duration_mask_to_segments(self, mask, time_steps):
+        kept = torch.where(mask)[0].detach().cpu().tolist()
+        if not kept:
+            kept = [0]
+        segments = []
+        for idx, start in enumerate(kept):
+            end = kept[idx + 1] if idx + 1 < len(kept) else time_steps
+            segments.append((int(start), int(max(start + 1, end))))
+        return segments
+
+    def _duration_keep_mask(self, feature):
+        dur_cfg = self.cfg.model.duration_codec
+        time_steps = int(feature.shape[-1])
+        mask = torch.zeros(time_steps, device=feature.device, dtype=torch.bool)
+        if time_steps == 0:
+            return mask, feature.new_tensor(0.0), feature.new_tensor(0.0), feature.new_tensor(0.0)
+        mask[0] = True
+        if time_steps > 1:
+            threshold = float(dur_cfg.get('boundary_cosine_threshold', 0.90))
+            if bool(dur_cfg.get('boundary_dynamic_threshold', False)) and self.training:
+                lo = float(dur_cfg.get('boundary_dynamic_threshold_lower', 0.85))
+                hi = float(dur_cfg.get('boundary_dynamic_threshold_upper', 1.0))
+                threshold = random.uniform(lo, hi)
+            feat = F.normalize(feature.detach().float(), dim=0)
+            similarities = (feat[:, 1:] * feat[:, :-1]).sum(dim=0).clamp(-1.0, 1.0)
+            mask[1:] = similarities < threshold
+            min_span = max(1, int(dur_cfg.get('min_segment_frames', 1)))
+            if min_span > 1:
+                kept_idx = torch.where(mask)[0]
+                if kept_idx.numel() > 1:
+                    prev_idx = torch.cat([kept_idx.new_zeros(1), kept_idx[:-1]])
+                    too_short = (kept_idx - prev_idx) < min_span
+                    too_short[0] = False
+                    mask[kept_idx[too_short]] = False
+            max_span = max(1, int(dur_cfg.get('max_segment_frames', 16)))
+            idx = torch.arange(time_steps, device=feature.device)
+            kept_idx = torch.where(mask, idx, torch.full_like(idx, -1))
+            last_kept_idx, _ = torch.cummax(kept_idx, dim=0)
+            run = torch.where(mask, torch.zeros_like(idx), idx - last_kept_idx)
+            mask = mask | ((~mask) & (run > 0) & ((run % max_span) == 0))
+            distance = (1.0 - similarities).clamp_min(0.0)
+            return mask, distance.sum(), distance.mean(), feature.new_tensor(threshold)
+        return mask, feature.new_tensor(0.0), feature.new_tensor(0.0), feature.new_tensor(0.0)
+
+    def _duration_scalar_loss(self, value, like):
+        if isinstance(value, (list, tuple)):
+            values = [self._duration_scalar_loss(v, like) for v in value if v is not None]
+            return sum(values) if values else like.new_tensor(0.0)
+        if torch.is_tensor(value):
+            return value.mean() if value.dim() > 0 else value
+        return like.new_tensor(float(value))
+
+    @staticmethod
+    def _duration_extract_code_ids(vq_code):
+        if not torch.is_tensor(vq_code):
+            return None
+        code_tensor = vq_code.detach()
+        if code_tensor.dim() >= 3:
+            return code_tensor[0, 0].reshape(-1)
+        if code_tensor.dim() == 2:
+            return code_tensor[0].reshape(-1)
+        return code_tensor.reshape(-1)
+
+    def _duration_segment_joint_quantize(self, vq_emb, z_f0):
+        time_steps = int(vq_emb.shape[-1])
+        frames, codes, losses, perplexities, active_nums = [], [], [], [], []
+        duration_values, duration_segments, duration_code_ids, segment_counts = [], [], [], []
+        path_lengths, mean_distances, taus = [], [], []
+
+        for batch_idx in range(vq_emb.shape[0]):
+            feature = self._duration_boundary_feature(vq_emb, z_f0, batch_idx)
+            mask, path_length, mean_distance, tau = self._duration_keep_mask(feature)
+            segments = self._duration_mask_to_segments(mask, time_steps)
+            if not segments:
+                segments = [(0, time_steps)]
+
+            content_pooled, f0_pooled, durations = [], [], []
+            for start, end in segments:
+                end = max(int(end), int(start) + 1)
+                content_pooled.append(vq_emb[batch_idx:batch_idx + 1, :, start:end].mean(dim=-1))
+                f0_pooled.append(z_f0[batch_idx:batch_idx + 1, :, start:end].mean(dim=-1))
+                durations.append(end - int(start))
+
+            content_seg = torch.stack(content_pooled, dim=-1)
+            f0_seg = torch.stack(f0_pooled, dim=-1)
+            segment_input = self.model['joint_mixer'](torch.cat([content_seg, f0_seg], dim=1))
+            if 'duration_local_attention' in self.model:
+                segment_input = self.model['duration_local_attention'](segment_input)
+
+            vq_post, vq_code, vq_loss, perplexity, active_num = self.model['generator'](
+                segment_input,
+                total_step=self.total_step,
+                vq=True,
+            )
+
+            frame_chunks = [
+                vq_post[:, :, seg_idx:seg_idx + 1].expand(-1, -1, max(1, int(duration)))
+                for seg_idx, duration in enumerate(durations)
+            ]
+            frame = torch.cat(frame_chunks, dim=-1)
+            if frame.shape[-1] != time_steps:
+                frame = F.interpolate(frame, size=time_steps, mode='nearest')
+            if 'duration_unmerge_attention' in self.model:
+                frame = self.model['duration_unmerge_attention'](frame)
+
+            duration_tensor = torch.tensor(durations, device=vq_emb.device, dtype=torch.float32)
+            frames.append(frame)
+            codes.append(vq_code)
+            losses.append(self._duration_scalar_loss(vq_loss, vq_emb))
+            perplexities.append(perplexity if torch.is_tensor(perplexity) else torch.tensor(perplexity, device=vq_emb.device))
+            active_nums.append(active_num if torch.is_tensor(active_num) else torch.tensor(active_num, device=vq_emb.device))
+            duration_values.append(duration_tensor)
+            duration_segments.append([(int(start), int(end)) for start, end in segments])
+            code_ids = self._duration_extract_code_ids(vq_code)
+            duration_code_ids.append(code_ids.cpu() if code_ids is not None else None)
+            segment_counts.append(torch.tensor(float(len(durations)), device=vq_emb.device))
+            path_lengths.append(path_length.float())
+            mean_distances.append(mean_distance.float())
+            taus.append(tau.float())
+
+        duration_values = torch.cat(duration_values) if duration_values else vq_emb.new_empty(0)
+        zero = vq_emb.new_tensor(0.0)
+        avg_segments = torch.stack(segment_counts).mean() if segment_counts else zero
+        stats = {
+            'duration_values': duration_values,
+            'duration_segments': duration_segments,
+            'duration_code_ids': duration_code_ids,
+            'duration_pred_values': vq_emb.new_empty(0),
+            'duration_pred_segments': [],
+            'duration_avg_segments': avg_segments,
+            'duration_compression_ratio': avg_segments / float(max(time_steps, 1)),
+            'duration_mean_frames': duration_values.mean() if duration_values.numel() else zero,
+            'duration_var_frames': duration_values.var(unbiased=False) if duration_values.numel() else zero,
+            'duration_std_frames': duration_values.std(unbiased=False) if duration_values.numel() else zero,
+            'duration_max_frames': duration_values.max() if duration_values.numel() else zero,
+            'duration_singleton_ratio': (duration_values == 1).float().mean() if duration_values.numel() else zero,
+            'duration_ge4_ratio': (duration_values >= 4).float().mean() if duration_values.numel() else zero,
+            'duration_avg_tau': torch.stack(taus).mean() if taus else zero,
+            'duration_avg_path_length': torch.stack(path_lengths).mean() if path_lengths else zero,
+            'duration_avg_step_distance': torch.stack(mean_distances).mean() if mean_distances else zero,
+        }
+        return (
+            torch.cat(frames, dim=0),
+            codes,
+            losses,
+            torch.stack([p.float().mean() for p in perplexities]).mean(),
+            torch.stack([a.float().mean() for a in active_nums]).mean(),
+            stats,
+        )
+
+    def _duration_free_joint_quantize(self, vq_emb, z_f0):
+        if z_f0.shape[-1] != vq_emb.shape[-1]:
+            z_f0 = F.interpolate(z_f0, size=vq_emb.shape[-1], mode='nearest')
+        merge_type = str(self.cfg.model.duration_codec.get('token_merge_type', 'flexicodec')).strip().lower()
+        if merge_type in {'flexicodec', 'flexi', 'segment_duration'}:
+            return self._duration_segment_joint_quantize(vq_emb, z_f0)
+
+        time_steps = int(vq_emb.shape[-1])
+        joint_frame = self.model['joint_mixer'](torch.cat([vq_emb, z_f0], dim=1))
+        if 'duration_local_attention' in self.model:
+            joint_frame = self.model['duration_local_attention'](joint_frame)
+
+        frames, codes, losses, perplexities, active_nums = [], [], [], [], []
+        duration_values, duration_segments, duration_code_ids, segment_counts = [], [], [], []
+        path_lengths, mean_distances, taus = [], [], []
+        for batch_idx in range(joint_frame.shape[0]):
+            feature = self._duration_boundary_feature(vq_emb, z_f0, batch_idx)
+            mask, path_length, mean_distance, tau = self._duration_keep_mask(feature)
+            kept_idx = torch.where(mask)[0]
+            if kept_idx.numel() == 0:
+                kept_idx = torch.zeros(1, device=joint_frame.device, dtype=torch.long)
+            kept_input = joint_frame[batch_idx:batch_idx + 1].index_select(-1, kept_idx)
+            vq_post, vq_code, vq_loss, perplexity, active_num = self.model['generator'](
+                kept_input,
+                total_step=self.total_step,
+                vq=True,
+            )
+            if 'duration_mask_fill' in self.model:
+                frame = self.model['duration_mask_fill'](1, time_steps, vq_emb.device, vq_post.dtype)
+            else:
+                frame = vq_post.new_zeros(1, vq_post.shape[1], time_steps)
+            frame[:, :, kept_idx] = vq_post
+            if 'duration_unmerge_attention' in self.model:
+                frame = self.model['duration_unmerge_attention'](frame)
+
+            segments = self._duration_mask_to_segments(mask, time_steps)
+            durations = torch.tensor([end - start for start, end in segments], device=vq_emb.device, dtype=torch.float32)
+            frames.append(frame)
+            codes.append(vq_code)
+            losses.append(self._duration_scalar_loss(vq_loss, vq_emb))
+            perplexities.append(perplexity if torch.is_tensor(perplexity) else torch.tensor(perplexity, device=vq_emb.device))
+            active_nums.append(active_num if torch.is_tensor(active_num) else torch.tensor(active_num, device=vq_emb.device))
+            duration_values.append(durations)
+            duration_segments.append(segments)
+            code_ids = self._duration_extract_code_ids(vq_code)
+            duration_code_ids.append(code_ids.cpu() if code_ids is not None else None)
+            segment_counts.append(torch.tensor(float(kept_idx.numel()), device=vq_emb.device))
+            path_lengths.append(path_length.float())
+            mean_distances.append(mean_distance.float())
+            taus.append(tau.float())
+
+        duration_values = torch.cat(duration_values) if duration_values else vq_emb.new_empty(0)
+        zero = vq_emb.new_tensor(0.0)
+        avg_segments = torch.stack(segment_counts).mean() if segment_counts else zero
+        stats = {
+            'duration_values': duration_values,
+            'duration_segments': duration_segments,
+            'duration_code_ids': duration_code_ids,
+            'duration_pred_values': vq_emb.new_empty(0),
+            'duration_pred_segments': [],
+            'duration_avg_segments': avg_segments,
+            'duration_compression_ratio': avg_segments / float(max(time_steps, 1)),
+            'duration_mean_frames': duration_values.mean() if duration_values.numel() else zero,
+            'duration_var_frames': duration_values.var(unbiased=False) if duration_values.numel() else zero,
+            'duration_std_frames': duration_values.std(unbiased=False) if duration_values.numel() else zero,
+            'duration_max_frames': duration_values.max() if duration_values.numel() else zero,
+            'duration_singleton_ratio': (duration_values == 1).float().mean() if duration_values.numel() else zero,
+            'duration_ge4_ratio': (duration_values >= 4).float().mean() if duration_values.numel() else zero,
+            'duration_avg_tau': torch.stack(taus).mean() if taus else zero,
+            'duration_avg_path_length': torch.stack(path_lengths).mean() if path_lengths else zero,
+            'duration_avg_step_distance': torch.stack(mean_distances).mean() if mean_distances else zero,
+        }
+        return (
+            torch.cat(frames, dim=0),
+            codes,
+            losses,
+            torch.stack([p.float().mean() for p in perplexities]).mean(),
+            torch.stack([a.float().mean() for a in active_nums]).mean(),
+            stats,
+        )
+
     def forward(self, batch):
         timing_active = self._timing_is_active()
         if timing_active:
@@ -2546,8 +2871,12 @@ class SdpCodecLightningModule(pl.LightningModule):
             now = self._timing_now()
             self._timing_add('forward_f0_path', now - seg_t0)
             seg_t0 = now
-        
-        vq_post_emb, vq_code, vq_loss, perplexity, active_num = self.model['generator'](content_f0_emb, total_step=self.total_step, vq=True)
+
+        duration_stats = {}
+        if self._duration_enabled():
+            vq_post_emb, vq_code, vq_loss, perplexity, active_num, duration_stats = self._duration_free_joint_quantize(vq_emb, z_f0_)
+        else:
+            vq_post_emb, vq_code, vq_loss, perplexity, active_num = self.model['generator'](content_f0_emb, total_step=self.total_step, vq=True)
         if timing_active:
             now = self._timing_now()
             self._timing_add('forward_joint_vq', now - seg_t0)
@@ -2676,6 +3005,7 @@ class SdpCodecLightningModule(pl.LightningModule):
             'gt_f0_log': gt_f0_log,
             'decoder_aux': decoder_aux,
         }
+        output.update(duration_stats)
         return output
     
     def tokenizer(self, batch):
@@ -3156,6 +3486,9 @@ class SdpCodecLightningModule(pl.LightningModule):
         gen_loss = gen_loss + f0_l2_loss * cfg.lambdas.lambda_f0_recon_loss
 
         self.set_discriminator_gradients(True)
+        for key, value in output.items():
+            if key.startswith('duration_') and torch.is_tensor(value) and value.numel() == 1:
+                loss_dict[key] = value
         loss_dict['gen_loss'] = gen_loss
         if timing_active:
             self._timing_add('gen_loss_total', self._timing_now() - gen_t0)
@@ -3996,6 +4329,10 @@ class SdpCodecLightningModule(pl.LightningModule):
         if output_vc is not None and 'gen_wav' in output_vc:
             sample['audio_gen_vc'] = output_vc['gen_wav'][0].detach().cpu()
             sample['audio_gen_vc_sr'] = self.cfg.preprocess.audio.sr
+        duration_segments = output.get('duration_segments')
+        if isinstance(duration_segments, list) and duration_segments:
+            sample['duration_segments'] = duration_segments[0]
+            sample['duration_frame_count'] = int(output['vq_post_emb'].shape[-1])
         self.val_step_plot_outputs.append(sample)
 
     def _transcribe_hubert(self, audio_16k: torch.Tensor) -> str:
@@ -4439,6 +4776,9 @@ class SdpCodecLightningModule(pl.LightningModule):
                 'apn_real_loss': gen_losses.get('apn_real_loss', z()),
                 'apn_imag_loss': gen_losses.get('apn_imag_loss', z()),
             })
+        for key, value in gen_losses.items():
+            if key.startswith('duration_') and torch.is_tensor(value) and value.numel() == 1:
+                losses[key] = value
 
         # --- scaled (lambda 적용 후) ---
         lmb = self.cfg.train.lambdas
@@ -4600,6 +4940,9 @@ class SdpCodecLightningModule(pl.LightningModule):
             self.model['joint_mixer'].parameters(),  # SdpCodec: joint projection layers
             self.model['joint_to_audio_f0'].parameters(),
         ]
+        for name in ('duration_local_attention', 'duration_mask_fill', 'duration_unmerge_attention'):
+            if name in self.model:
+                gen_params_list.append(self.model[name].parameters())
 
         if self.cfg.model.f0_codec.get('finetune_f0_extractor', False):
             print(colored("Defining f0_extractor parameters to optimizer", "yellow"))
