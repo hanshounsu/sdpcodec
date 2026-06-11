@@ -295,7 +295,7 @@ train:
   num_pesq_processor: 4
   transit_step: 1000
   xd_loss_fade_step: null
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
   unfreeze_encoder_step: null
   cmi_steps: 5
   use_torch_compile: false

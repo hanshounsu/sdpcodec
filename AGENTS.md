@@ -25,6 +25,13 @@
   CPU = `16 x GPU count`, RAM = `26G x GPU count`.
 - For example, a 2-GPU job should request `--cpus-per-task=32` and
   `--mem=52G`.
+- SDPCodec uses manual optimization; its real gradient accumulation is
+  `train.gradient_accumulation_steps`, not Lightning's trainer accumulation.
+  Keep SDPCodec effective train batch size at least 16:
+  `GPU count x dataset.train.batch_size x train.gradient_accumulation_steps >= 16`.
+  For the standard 2-GPU, per-device batch 4 launch, set
+  `train.gradient_accumulation_steps=2` and keep
+  `train.trainer.accumulate_grad_batches=1`.
 - Never launch, submit, resume, restart, or otherwise start any experiment
   unless the user explicitly asks to run that exact action in the current
   conversation. Editing configs/scripts, answering questions, checking status,
