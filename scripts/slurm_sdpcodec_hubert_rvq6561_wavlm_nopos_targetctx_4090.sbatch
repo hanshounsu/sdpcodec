@@ -41,7 +41,7 @@ DEBUG_DATASET_NAME="${DEBUG_DATASET_NAME:-librispeech}"
 RUN_HASH="${RUN_HASH:-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')}"
 RUN_STAMP="${RUN_STAMP:-$(date +%F-%H-%M-%S)-${RUN_HASH}}"
 HYDRA_RUN_DIR="${HYDRA_RUN_DIR:-${OUTPUT_ROOT}/${RUN_STAMP}}"
-WANDB_RUN_NAME="${WANDB_RUN_NAME:-sdpcodec/hubert/MLS+LS/25Hz/rvq6561/targetctxrefclip/wavlm_nopos/no_posconv_no_relpos/b4ddp4acc1/train6s/val6s/current/${RUN_STAMP}}"
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-sdpcodec/hubert/MLS+LS/25Hz/rvq6561/targetctxrefclip/wavlm_nopos/no_posconv_no_relpos/b4ddp2acc2/train6s/val6s/current/${RUN_STAMP}}"
 EXTRA_OVERRIDES="${EXTRA_OVERRIDES:-}"
 
 export HF_HOME="${HF_HOME:-/data/hounsu/.cache/huggingface}"

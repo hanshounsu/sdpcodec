@@ -11,4 +11,4 @@ model:
     wavlm_disable_relative_position_bias: true
 
 train:
-  wandb_name: sdpcodec/hubert/MLS+LS/25Hz/rvq6561/targetctxrefclip/wavlm_nopos/no_posconv_no_relpos/b4ddp4acc1/train6s/val6s
+  wandb_name: sdpcodec/hubert/MLS+LS/25Hz/rvq6561/targetctxrefclip/wavlm_nopos/no_posconv_no_relpos/b4ddp2acc2/train6s/val6s

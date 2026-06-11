@@ -303,7 +303,7 @@ train:
   wandb_enabled: true
   wandb_offline: false
   wandb_project: SDPCodec
-  wandb_name: sdpcodec/hubert/MLS+LS/25Hz/rvq6561/nearbyrefclip/b4ddp4acc1/train6s/val6s
+  wandb_name: sdpcodec/hubert/MLS+LS/25Hz/rvq6561/nearbyrefclip/b4ddp2acc2/train6s/val6s
   wandb_append_timestamp: true
   use_val_utmos: true
   use_val_wavlm: true
