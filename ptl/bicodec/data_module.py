@@ -1802,13 +1802,20 @@ class FSDataset(Dataset):
                 f"Unsupported dataset.train_ref_clip_mode={configured_ref_mode!r}; "
                 f"expected one of {sorted(valid_ref_modes)}"
             )
+        spk_cfg = cfg.model.get("speaker_encoder", {})
+        self.wavlm_no_pos_ref_clip = bool(spk_cfg.get("wavlm_disable_pos_conv", False)) and bool(
+            spk_cfg.get("wavlm_disable_relative_position_bias", False)
+        )
         self.skip_ref_clip_train = self.phase == "train" and self.train_ref_clip_mode == "target"
         if self.skip_ref_clip_train:
             assert cfg.preprocess.audio.sr == 16000, "Only 16kHz is supported for skipping ref-clip in train"
         if self.phase == "train":
+            ref_mode_for_log = self.train_ref_clip_mode
+            if self.train_ref_clip_mode == "nearby" and self.wavlm_no_pos_ref_clip:
+                ref_mode_for_log = "target_context"
             print(
                 colored(
-                    f"Train reference clip mode for {self.dataset_name}: {self.train_ref_clip_mode}",
+                    f"Train reference clip mode for {self.dataset_name}: {ref_mode_for_log}",
                     "green",
                     attrs=['bold'],
                 )
@@ -1956,6 +1963,46 @@ class FSDataset(Dataset):
             reps = (ref_len + ref.shape[0] - 1) // ref.shape[0]
             ref = ref.repeat(reps)
         return ref[:ref_len]
+
+    def get_target_context_ref_clip(self, wav: torch.Tensor, target_start: int, target_end: int) -> torch.Tensor:
+        ref_len = (int(self.sr * self.ref_segment_duration) //
+                   self.latent_hop_length) * self.latent_hop_length
+        wav_len = wav.shape[0]
+        if wav_len <= 0 or ref_len <= 0:
+            return wav
+
+        target_start = max(0, min(int(target_start), wav_len))
+        target_end = max(target_start, min(int(target_end), wav_len))
+        target_len = target_end - target_start
+
+        if wav_len <= ref_len:
+            reps = (ref_len + wav_len - 1) // wav_len
+            return wav.repeat(reps)[:ref_len]
+
+        if target_len <= 0:
+            return wav[:ref_len]
+
+        if target_len >= ref_len:
+            start = target_start + (target_len - ref_len) // 2
+            return wav[start:start + ref_len]
+
+        extra = ref_len - target_len
+        left_avail = target_start
+        right_avail = wav_len - target_end
+        left_take = min(left_avail, extra // 2)
+        right_take = min(right_avail, extra - left_take)
+
+        remaining = extra - left_take - right_take
+        if remaining > 0:
+            add_left = min(left_avail - left_take, remaining)
+            left_take += add_left
+            remaining -= add_left
+        if remaining > 0:
+            right_take += min(right_avail - right_take, remaining)
+
+        start = target_start - left_take
+        end = target_end + right_take
+        return wav[start:end][:ref_len]
 
     # @timeit
     def _timbre_perturb(self, w: torch.Tensor, sr: int) -> torch.Tensor:
@@ -2111,7 +2158,10 @@ class FSDataset(Dataset):
                 # use target segment itself as reference to remove ref-clip variance.
                 ref_wav_16k = target_wav
             elif self.phase == 'train' and self.train_ref_clip_mode == "nearby":
-                ref_wav = self.get_nearby_ref_clip(full_wav, start, end)
+                if self.wavlm_no_pos_ref_clip:
+                    ref_wav = self.get_target_context_ref_clip(full_wav, start, end)
+                else:
+                    ref_wav = self.get_nearby_ref_clip(full_wav, start, end)
                 ref_wav_16k = to16k(ref_wav) if is_24k else ref_wav
             else:
                 ref_wav = self.get_ref_clip(full_wav, start, end, use_full)
