@@ -105,6 +105,39 @@ def _debug_tensor_stats(x):
         return stats
 
 
+def _normalize_fcpe_loss_mode(f0cfg) -> str:
+    mode = f0cfg.get('fcpe_loss_mode', None)
+    if mode is None:
+        return 'dense' if bool(f0cfg.get('use_fcpe_loss', False)) else 'none'
+    mode = str(mode).strip().lower()
+    if mode in {'', 'none', 'off', 'false', '0', 'disabled'}:
+        return 'none'
+    if mode in {'true', '1', 'on', 'enabled', 'bce', 'wbce'}:
+        return 'dense'
+    if mode in {
+        'dense',
+        'discretized_mixture',
+        'mixture',
+        'asym_discretized_mixture',
+        'asymmetric_discretized_mixture',
+    }:
+        return mode
+    raise ValueError(f"Unsupported fcpe_loss_mode: {mode}")
+
+
+def _fcpe_loss_enabled(f0cfg) -> bool:
+    return _normalize_fcpe_loss_mode(f0cfg) != 'none'
+
+
+def _fcpe_loss_is_mixture(f0cfg) -> bool:
+    return _normalize_fcpe_loss_mode(f0cfg) in {
+        'discretized_mixture',
+        'mixture',
+        'asym_discretized_mixture',
+        'asymmetric_discretized_mixture',
+    }
+
+
 class _LocalSelfAttention1d(nn.Module):
     def __init__(self, dim, num_heads=8, num_layers=1, window=16, dropout=0.0, ffn_mult=4.0):
         super().__init__()
@@ -491,9 +524,11 @@ class SdpCodecLightningModule(pl.LightningModule):
 
         f0cfg = self.cfg.model.f0_codec
         use_unnormf0_mse_loss = f0cfg.get('use_unnormf0_mse_loss', False)
+        fcpe_loss_mode = _normalize_fcpe_loss_mode(f0cfg)
+        fcpe_loss_enabled = fcpe_loss_mode != 'none'
         if use_unnormf0_mse_loss:
             # assert f0cfg.use_normalized_f0, "use_unnormf0_mse_loss requires use_normalized_f0=True" -> use_normalized_f0=False 이면 f0_decoder_speaker_condition=False 로 두고 input output 전부 unnorm F0 로 학습됨.
-            assert not f0cfg.get('use_fcpe_loss', False), "use_unnormf0_mse_loss is incompatible with use_fcpe_loss"
+            assert not fcpe_loss_enabled, "use_unnormf0_mse_loss is incompatible with fcpe_loss_mode != none"
             print(colored("F0 codec: enabling unnormalized F0 MSE loss (targets use log1p raw F0)", "yellow"))
         if not f0cfg.zero_out_all_unvoiced:
             print(colored(f"F0 codec: using 1-dim input (raw f0 with -3 for unvoiced frames)", "yellow"))
@@ -622,8 +657,7 @@ class SdpCodecLightningModule(pl.LightningModule):
             # F0 decoder speaker conditioning: enable when using normalized f0 + fcpe loss
             # This helps the model learn speaker-specific pitch ranges
             use_normalized_f0 = f0cfg.get('use_normalized_f0', False)
-            use_fcpe_loss = f0cfg.get('use_fcpe_loss', False)
-            legacy_f0_spk_cond = use_normalized_f0 and (use_fcpe_loss or use_unnormf0_mse_loss)
+            legacy_f0_spk_cond = use_normalized_f0 and (fcpe_loss_enabled or use_unnormf0_mse_loss)
             f0_spk_cond_cfg = F0CodecSpeakerConditionConfig.from_f0_cfg(f0cfg)
             f0_decoder_use_concat = f0_spk_cond_cfg.resolve_concat(legacy_f0_spk_cond)
             f0_decoder_use_film = f0_spk_cond_cfg.resolve_film(legacy_f0_spk_cond)
@@ -667,7 +701,10 @@ class SdpCodecLightningModule(pl.LightningModule):
                     level2_num_layers=decoder_level2_num_layers,
                     level1_num_layers=decoder_level1_num_layers,
                     upsample_factor=f0_decoder_upsample_factor,
-                    use_fcpe_loss=use_fcpe_loss,
+                    fcpe_loss_mode=fcpe_loss_mode,
+                    fcpe_mixture_components=f0cfg.get('fcpe_mixture_components', 2),
+                    fcpe_mixture_min_sigma=f0cfg.get('fcpe_mixture_min_sigma', 0.75),
+                    fcpe_mixture_max_sigma=f0cfg.get('fcpe_mixture_max_sigma', 80.0),
                     fcpe_out_dims=f0cfg.get('fcpe_out_dims', 360),
                     speaker_condition=f0_decoder_speaker_condition,
                     condition_dim=spkcfg.out_dim if f0_decoder_speaker_condition else 0,
@@ -709,7 +746,10 @@ class SdpCodecLightningModule(pl.LightningModule):
                     dilations=f0_decoder_cfg.dilations,
                     activation_type=f0_decoder_cfg.activation_type,
                     leaky_relu_params=f0_decoder_cfg.leaky_relu_params,
-                    use_fcpe_loss=use_fcpe_loss,
+                    fcpe_loss_mode=fcpe_loss_mode,
+                    fcpe_mixture_components=f0cfg.get('fcpe_mixture_components', 2),
+                    fcpe_mixture_min_sigma=f0cfg.get('fcpe_mixture_min_sigma', 0.75),
+                    fcpe_mixture_max_sigma=f0cfg.get('fcpe_mixture_max_sigma', 80.0),
                     fcpe_out_dims=f0cfg.get('fcpe_out_dims', 360),
                     speaker_condition=f0_decoder_speaker_condition,
                     condition_dim=spkcfg.out_dim if f0_decoder_speaker_condition else 0,
@@ -1477,7 +1517,12 @@ class SdpCodecLightningModule(pl.LightningModule):
             if hasattr(f0cfg, 'width_list'):
                 stage_dims.extend(list(reversed(f0cfg.width_list[0])))
 
-        if not getattr(f0_decoder, 'use_fcpe_loss', False):
+        fcpe_decoder_enabled = getattr(
+            f0_decoder,
+            'fcpe_loss_enabled',
+            getattr(f0_decoder, 'use_fcpe_loss', False),
+        )
+        if not fcpe_decoder_enabled:
             final_output_dim = int(getattr(f0_decoder, 'output_channels', 2 if bool(f0cfg.zero_out_all_unvoiced) else 1))
             stage_dims.append(final_output_dim)
 
@@ -2827,9 +2872,10 @@ class SdpCodecLightningModule(pl.LightningModule):
         
         # Step 1: Extract and encode F0
         f0cfg = self.cfg.model.f0_codec
+        fcpe_loss_enabled = _fcpe_loss_enabled(f0cfg)
         need_fcpe_teacher = (
             f0cfg.get('use_fcpe_input_dist', False)
-            or f0cfg.get('fcpe_loss_target', 'gaussian') == 'raw'
+            or (fcpe_loss_enabled and f0cfg.get('fcpe_loss_target', 'gaussian') == 'raw')
         )
         if need_fcpe_teacher:
             f0, f0_normalized, vuv, gt_fcpe_latent = self.extract_f0(batch, return_fcpe_latent=True)
@@ -2906,15 +2952,16 @@ class SdpCodecLightningModule(pl.LightningModule):
         elif getattr(f0_decoder_module, 'speaker_condition', False):
             f0_spk_cond = spk_cond_vec
 
-        # F0 decoder output: (outs, fcpe_latent) if use_fcpe_loss else outs
+        # F0 decoder output: (outs, fcpe_latent) if fcpe_loss_mode != none else outs
         if f0_spk_cond is not None:
             f0_decoder_out = f0_decoder_module(f0_post_emb, spk_emb=f0_spk_cond)
         else:
             f0_decoder_out = f0_decoder_module(f0_post_emb)
         
-        if self.cfg.model.f0_codec.get('use_fcpe_loss', False):
+        if fcpe_loss_enabled:
             f0_vuv_recons, f0_fcpe_latent = f0_decoder_out  # unpack tuple
             f0_fcpe_logits = getattr(f0_decoder_module, 'last_fcpe_logits', None)
+            f0_fcpe_mixture_params = getattr(f0_decoder_module, 'last_fcpe_mixture_params', None)
             # FCPE mode: decode F0 from latent
             # latent (B, 360, T) → cents → raw Hz F0
             # Transpose to (B, T, 360) for FCPE decoder
@@ -2957,6 +3004,7 @@ class SdpCodecLightningModule(pl.LightningModule):
             f0_vuv_recons = f0_decoder_out
             f0_fcpe_latent = None
             f0_fcpe_logits = None
+            f0_fcpe_mixture_params = None
             gen_f0_vuv_output = f0_vuv_recons[-1]  # Use predicted F0
         if timing_active:
             now = self._timing_now()
@@ -3000,6 +3048,7 @@ class SdpCodecLightningModule(pl.LightningModule):
             'f0_vq_loss': None,  # SdpCodec: no separate F0 VQ loss (joint quantization)
             'f0_fcpe_latent': f0_fcpe_latent,  # FCPE-style latent (B, 360, T) or None
             'f0_fcpe_logits': f0_fcpe_logits,  # Pre-sigmoid FCPE logits for stable BCEWithLogits loss
+            'f0_fcpe_mixture_params': f0_fcpe_mixture_params,
             'gt_fcpe_latent': gt_fcpe_latent,
             'gt_f0': f0,  # Raw F0 for FCPE loss computation
             'gt_f0_log': gt_f0_log,
@@ -3296,7 +3345,8 @@ class SdpCodecLightningModule(pl.LightningModule):
         # print('gen vuv max min', torch.max(f0_vuv_.select(1, 1)).item(), torch.min(f0_vuv_.select(1, 1)).item())
         # gt f0_vuv is always 2 channels: [0]=f0, [1]=vuv
         # FCPE mode: f0_vuv_ is GT (not predicted), skip F0 reconstruction loss
-        use_fcpe = self.cfg.model.f0_codec.get('use_fcpe_loss', False)
+        use_fcpe = _fcpe_loss_enabled(self.cfg.model.f0_codec)
+        use_fcpe_mixture = _fcpe_loss_is_mixture(self.cfg.model.f0_codec)
         use_unnorm_mse = self.use_unnormf0_mse_loss
         if not use_fcpe:
             vuv = f0_vuv.select(1, 1)
@@ -3326,7 +3376,7 @@ class SdpCodecLightningModule(pl.LightningModule):
             vuv_bce_loss = torch.tensor(0.0, device=self.device)
         
         # F0 reconstruction loss: skip if using FCPE loss
-        # When use_fcpe_loss=True, we only train with FCPE latent BCE loss
+        # When fcpe_loss_mode is enabled, skip direct scalar-F0 reconstruction.
         if not use_fcpe:
             f0_l2_loss = self.criteria['l2_loss'](f0_, f0)
         else:
@@ -3386,7 +3436,7 @@ class SdpCodecLightningModule(pl.LightningModule):
                 decoder_debug = getattr(self.model['f0_decoder'], 'last_forward_debug', None)
                 f0_path_debug = getattr(self, '_last_f0_path_debug', None)
                 raise RuntimeError(
-                    "Non-finite FCPE logits detected before BCEWithLogitsLoss "
+                    "Non-finite FCPE logits detected before FCPE loss "
                     f"(step={self.global_step}, rank={self.global_rank}, {stats}, "
                     f"non_finite={int((~finite_mask).sum().item())}, "
                     f"decoder_debug={decoder_debug}, "
@@ -3394,41 +3444,42 @@ class SdpCodecLightningModule(pl.LightningModule):
                 )
             if not torch.isfinite(gt_fcpe_latent_fp32).all():
                 raise RuntimeError(
-                    "Non-finite FCPE targets detected before BCEWithLogitsLoss "
+                    "Non-finite FCPE targets detected before FCPE loss "
                     f"(step={self.global_step}, rank={self.global_rank})."
                 )
 
-            # BCEWithLogits is more numerically stable than BCE on sigmoid outputs.
+            # Dense mode trains independent FCPE bins with BCEWithLogits.
+            # Mixture mode predicts compact parameters that are converted to
+            # discretized 360-bin mass and trained with target cross-entropy.
             with autocast(device_type=fcpe_logits_fp32.device.type, enabled=False):
-                weight_alpha = float(self.cfg.model.f0_codec.get('fcpe_bce_weight_alpha', 0.0))
-                fcpe_weight = None
-                if weight_alpha > 0.0:
-                    fcpe_weight = 1.0 + weight_alpha * gt_fcpe_latent_fp32
-                fcpe_bce_loss = F.binary_cross_entropy_with_logits(
-                    fcpe_logits_fp32,
-                    gt_fcpe_latent_fp32,
-                    weight=fcpe_weight,
-                )
-                fcpe_loss = fcpe_bce_loss
+                fcpe_bce_loss = torch.zeros((), device=fcpe_logits_fp32.device)
+                fcpe_discretized_nll_loss = torch.zeros((), device=fcpe_logits_fp32.device)
                 fcpe_kl_loss = torch.zeros((), device=fcpe_logits_fp32.device)
                 fcpe_cdf_loss = torch.zeros((), device=fcpe_logits_fp32.device)
                 fcpe_expected_cent_loss = torch.zeros((), device=fcpe_logits_fp32.device)
-
                 kl_weight = float(self.cfg.model.f0_codec.get('fcpe_dist_kl_weight', 0.0))
                 cdf_weight = float(self.cfg.model.f0_codec.get('fcpe_dist_cdf_weight', 0.0))
                 expected_weight = float(self.cfg.model.f0_codec.get('fcpe_expected_cent_weight', 0.0))
                 fcpe_active_ratio = torch.zeros((), device=fcpe_logits_fp32.device)
-                if kl_weight > 0.0 or cdf_weight > 0.0 or expected_weight > 0.0:
+
+                if use_fcpe_mixture:
                     eps = float(self.cfg.model.f0_codec.get('fcpe_dist_eps', 1.0e-6))
-                    temp = float(self.cfg.model.f0_codec.get('fcpe_dist_temperature', 1.0))
                     target_mass = gt_fcpe_latent_fp32.sum(dim=1, keepdim=True)
                     active_mask = target_mass.squeeze(1) > eps
                     fcpe_active_ratio = active_mask.float().mean()
+                    fcpe_loss = fcpe_discretized_nll_loss
                     if bool(active_mask.any().item()):
                         target_prob = gt_fcpe_latent_fp32 / target_mass.clamp_min(eps)
-                        log_pred_prob = F.log_softmax(fcpe_logits_fp32 / max(temp, eps), dim=1)
-                        pred_prob = log_pred_prob.exp()
+                        pred_mass = f0_fcpe_latent.float().sum(dim=1, keepdim=True)
+                        pred_prob = f0_fcpe_latent.float() / pred_mass.clamp_min(eps)
+                        log_pred_prob = pred_prob.clamp_min(eps).log()
                         frame_mask = active_mask.float()
+
+                        nll_per_frame = -(target_prob * log_pred_prob).sum(dim=1)
+                        fcpe_discretized_nll_loss = (
+                            nll_per_frame * frame_mask
+                        ).sum() / frame_mask.sum().clamp_min(1.0)
+                        fcpe_loss = fcpe_discretized_nll_loss
 
                         if kl_weight > 0.0:
                             kl_per_frame = F.kl_div(
@@ -3466,8 +3517,69 @@ class SdpCodecLightningModule(pl.LightningModule):
                                 expected_per_frame * frame_mask
                             ).sum() / frame_mask.sum().clamp_min(1.0)
                             fcpe_loss = fcpe_loss + expected_weight * fcpe_expected_cent_loss
+                else:
+                    weight_alpha = float(self.cfg.model.f0_codec.get('fcpe_bce_weight_alpha', 0.0))
+                    fcpe_weight = None
+                    if weight_alpha > 0.0:
+                        fcpe_weight = 1.0 + weight_alpha * gt_fcpe_latent_fp32
+                    fcpe_bce_loss = F.binary_cross_entropy_with_logits(
+                        fcpe_logits_fp32,
+                        gt_fcpe_latent_fp32,
+                        weight=fcpe_weight,
+                    )
+                    fcpe_loss = fcpe_bce_loss
+
+                    if kl_weight > 0.0 or cdf_weight > 0.0 or expected_weight > 0.0:
+                        eps = float(self.cfg.model.f0_codec.get('fcpe_dist_eps', 1.0e-6))
+                        temp = float(self.cfg.model.f0_codec.get('fcpe_dist_temperature', 1.0))
+                        target_mass = gt_fcpe_latent_fp32.sum(dim=1, keepdim=True)
+                        active_mask = target_mass.squeeze(1) > eps
+                        fcpe_active_ratio = active_mask.float().mean()
+                        if bool(active_mask.any().item()):
+                            target_prob = gt_fcpe_latent_fp32 / target_mass.clamp_min(eps)
+                            log_pred_prob = F.log_softmax(fcpe_logits_fp32 / max(temp, eps), dim=1)
+                            pred_prob = log_pred_prob.exp()
+                            frame_mask = active_mask.float()
+
+                            if kl_weight > 0.0:
+                                kl_per_frame = F.kl_div(
+                                    log_pred_prob,
+                                    target_prob,
+                                    reduction='none',
+                                    log_target=False,
+                                ).sum(dim=1)
+                                fcpe_kl_loss = (kl_per_frame * frame_mask).sum() / frame_mask.sum().clamp_min(1.0)
+                                fcpe_loss = fcpe_loss + kl_weight * fcpe_kl_loss
+
+                            if cdf_weight > 0.0:
+                                cdf_per_frame = (
+                                    pred_prob.cumsum(dim=1) - target_prob.cumsum(dim=1)
+                                ).abs().mean(dim=1)
+                                fcpe_cdf_loss = (cdf_per_frame * frame_mask).sum() / frame_mask.sum().clamp_min(1.0)
+                                fcpe_loss = fcpe_loss + cdf_weight * fcpe_cdf_loss
+
+                            if expected_weight > 0.0:
+                                bins = torch.linspace(
+                                    0.0,
+                                    1.0,
+                                    steps=fcpe_logits_fp32.shape[1],
+                                    device=fcpe_logits_fp32.device,
+                                    dtype=fcpe_logits_fp32.dtype,
+                                ).view(1, -1, 1)
+                                pred_expected = (pred_prob * bins).sum(dim=1)
+                                target_expected = (target_prob * bins).sum(dim=1)
+                                expected_per_frame = F.smooth_l1_loss(
+                                    pred_expected,
+                                    target_expected,
+                                    reduction='none',
+                                )
+                                fcpe_expected_cent_loss = (
+                                    expected_per_frame * frame_mask
+                                ).sum() / frame_mask.sum().clamp_min(1.0)
+                                fcpe_loss = fcpe_loss + expected_weight * fcpe_expected_cent_loss
             loss_dict['fcpe_loss'] = fcpe_loss
             loss_dict['fcpe_bce_loss'] = fcpe_bce_loss
+            loss_dict['fcpe_discretized_nll_loss'] = fcpe_discretized_nll_loss
             loss_dict['fcpe_kl_loss'] = fcpe_kl_loss
             loss_dict['fcpe_cdf_loss'] = fcpe_cdf_loss
             loss_dict['fcpe_expected_cent_loss'] = fcpe_expected_cent_loss
@@ -3476,6 +3588,7 @@ class SdpCodecLightningModule(pl.LightningModule):
         else:
             loss_dict['fcpe_loss'] = torch.tensor(0.0, device=self.device)
             loss_dict['fcpe_bce_loss'] = torch.tensor(0.0, device=self.device)
+            loss_dict['fcpe_discretized_nll_loss'] = torch.tensor(0.0, device=self.device)
             loss_dict['fcpe_kl_loss'] = torch.tensor(0.0, device=self.device)
             loss_dict['fcpe_cdf_loss'] = torch.tensor(0.0, device=self.device)
             loss_dict['fcpe_expected_cent_loss'] = torch.tensor(0.0, device=self.device)
@@ -3970,7 +4083,7 @@ class SdpCodecLightningModule(pl.LightningModule):
             # FCPE 모드: raw Hz 표시, Normal/Log1p 모드: normalized 값 표시
             use_fcpe_mode = (
                 self.cfg.model.f0_codec.get('use_normalized_f0', False)
-                and self.cfg.model.f0_codec.get('use_fcpe_loss', False)
+                and _fcpe_loss_enabled(self.cfg.model.f0_codec)
             )
             use_log1p_mode = self.use_unnormf0_mse_loss
 
@@ -4759,6 +4872,7 @@ class SdpCodecLightningModule(pl.LightningModule):
             'vuv_loss': gen_losses.get('vuv_loss', z()),
             'fcpe_loss': gen_losses.get('fcpe_loss', z()),
             'fcpe_bce_loss': gen_losses.get('fcpe_bce_loss', z()),
+            'fcpe_discretized_nll_loss': gen_losses.get('fcpe_discretized_nll_loss', z()),
             'fcpe_kl_loss': gen_losses.get('fcpe_kl_loss', z()),
             'fcpe_cdf_loss': gen_losses.get('fcpe_cdf_loss', z()),
             'fcpe_expected_cent_loss': gen_losses.get('fcpe_expected_cent_loss', z()),

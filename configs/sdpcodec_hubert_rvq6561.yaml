@@ -77,7 +77,7 @@ model:
     use_codec_structure: true
     use_normalized_f0: true
     upsample_extracted_f0: false
-    use_fcpe_loss: true
+    fcpe_loss_mode: dense
     use_unnormf0_mse_loss: false
     input_emb_width: 2
     output_emb_width: 128

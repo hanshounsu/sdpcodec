@@ -48,6 +48,110 @@ def _tensor_debug_stats(x: Optional[torch.Tensor]):
         return stats
 
 
+def fcpe_mixture_param_count(components: int = 2) -> int:
+    """weight, mean, left sigma, right sigma for each mixture component."""
+    return 4 * int(components)
+
+
+def _normal_cdf(x: torch.Tensor) -> torch.Tensor:
+    return 0.5 * (1.0 + torch.erf(x * (1.0 / math.sqrt(2.0))))
+
+
+def _two_piece_normal_cdf(
+    x: torch.Tensor,
+    mean: torch.Tensor,
+    sigma_left: torch.Tensor,
+    sigma_right: torch.Tensor,
+) -> torch.Tensor:
+    sigma_sum = (sigma_left + sigma_right).clamp_min(1.0e-6)
+    left_mass = sigma_left / sigma_sum
+    left = 2.0 * left_mass * _normal_cdf((x - mean) / sigma_left.clamp_min(1.0e-6))
+    right = left_mass + 2.0 * (1.0 - left_mass) * (
+        _normal_cdf((x - mean) / sigma_right.clamp_min(1.0e-6)) - 0.5
+    )
+    return torch.where(x < mean, left, right)
+
+
+def fcpe_mixture_params_to_distribution(
+    raw_params: torch.Tensor,
+    num_bins: int = 360,
+    components: int = 2,
+    min_sigma: float = 0.75,
+    max_sigma: float = 80.0,
+    eps: float = 1.0e-8,
+    sort_means: bool = True,
+) -> torch.Tensor:
+    """
+    Convert compact asymmetric Gaussian-mixture parameters to discretized FCPE bin mass.
+
+    Args:
+        raw_params: (B, 4*K, T), split as weight logits, mean raw, left sigma raw,
+            right sigma raw.
+    Returns:
+        Probability mass over FCPE bins, shape (B, num_bins, T).
+    """
+    k = int(components)
+    expected = fcpe_mixture_param_count(k)
+    if raw_params.dim() != 3 or raw_params.shape[1] != expected:
+        raise ValueError(
+            f"Expected raw_params shape (B, {expected}, T) for K={k}, got {tuple(raw_params.shape)}"
+        )
+
+    weight_logits, mean_raw, sigma_left_raw, sigma_right_raw = raw_params.float().chunk(4, dim=1)
+    mean = torch.sigmoid(mean_raw) * float(max(int(num_bins) - 1, 1))
+    sigma_left = float(min_sigma) + F.softplus(sigma_left_raw)
+    sigma_right = float(min_sigma) + F.softplus(sigma_right_raw)
+    sigma_left = sigma_left.clamp(max=float(max_sigma))
+    sigma_right = sigma_right.clamp(max=float(max_sigma))
+
+    if sort_means and k > 1:
+        order = mean.argsort(dim=1)
+        mean = torch.gather(mean, 1, order)
+        weight_logits = torch.gather(weight_logits, 1, order)
+        sigma_left = torch.gather(sigma_left, 1, order)
+        sigma_right = torch.gather(sigma_right, 1, order)
+
+    weights = torch.softmax(weight_logits, dim=1)
+    edges = torch.arange(
+        int(num_bins) + 1,
+        device=raw_params.device,
+        dtype=raw_params.float().dtype,
+    ).sub_(0.5)
+    edges = edges.view(1, 1, -1, 1)
+    mean = mean.unsqueeze(2)
+    sigma_left = sigma_left.unsqueeze(2)
+    sigma_right = sigma_right.unsqueeze(2)
+
+    cdf = _two_piece_normal_cdf(edges, mean, sigma_left, sigma_right)
+    component_mass = (cdf[:, :, 1:, :] - cdf[:, :, :-1, :]).clamp_min(float(eps))
+    prob = (weights.unsqueeze(2) * component_mass).sum(dim=1)
+    prob = prob / prob.sum(dim=1, keepdim=True).clamp_min(float(eps))
+    return prob.clamp_min(float(eps))
+
+
+def normalize_fcpe_loss_mode(fcpe_loss_mode=None, legacy_use_fcpe_loss=None) -> str:
+    if fcpe_loss_mode is None:
+        return 'dense' if bool(legacy_use_fcpe_loss) else 'none'
+    mode = str(fcpe_loss_mode).strip().lower()
+    if mode in {'', 'none', 'off', 'false', '0', 'disabled'}:
+        return 'none'
+    if mode in {'true', '1', 'on', 'enabled', 'bce', 'wbce'}:
+        return 'dense'
+    if mode in {
+        'dense',
+        'discretized_mixture',
+        'mixture',
+        'asym_discretized_mixture',
+        'asymmetric_discretized_mixture',
+    }:
+        return mode
+    raise ValueError(f"Unsupported fcpe_loss_mode: {fcpe_loss_mode}")
+
+
+def fcpe_loss_mode_enabled(fcpe_loss_mode: str) -> bool:
+    return normalize_fcpe_loss_mode(fcpe_loss_mode) != 'none'
+
+
 def build_channel_schedule(ngf, num_levels, max_channels=None):
     channels = []
     current = int(ngf)
@@ -336,8 +440,12 @@ class F0CodecDecoder(nn.Module):
                  dilations=(1, 3, 9),
                  activation_type='SnakeBeta',
                  leaky_relu_params=None,
-                 use_fcpe_loss=False,  # Use FCPE-style BCE loss
                  fcpe_out_dims=360,  # FCPE latent dimension
+                 fcpe_loss_mode=None,
+                 fcpe_mixture_components=2,
+                 fcpe_mixture_min_sigma=0.75,
+                 fcpe_mixture_max_sigma=80.0,
+                 use_fcpe_loss=None,  # Deprecated compatibility shim; prefer fcpe_loss_mode.
                  speaker_condition=False,  # Use speaker embedding as condition
                  condition_dim=0,  # Speaker embedding dimension
                  use_spk_concat=True,
@@ -355,8 +463,19 @@ class F0CodecDecoder(nn.Module):
         self.up_ratios = up_ratios
         self.in_channels = in_channels
         self.output_channels = output_channels
-        self.use_fcpe_loss = use_fcpe_loss
         self.fcpe_out_dims = fcpe_out_dims
+        self.fcpe_loss_mode = normalize_fcpe_loss_mode(fcpe_loss_mode, use_fcpe_loss)
+        self.fcpe_loss_enabled = fcpe_loss_mode_enabled(self.fcpe_loss_mode)
+        self.use_fcpe_loss = self.fcpe_loss_enabled
+        self.fcpe_mixture_components = int(fcpe_mixture_components)
+        self.fcpe_mixture_min_sigma = float(fcpe_mixture_min_sigma)
+        self.fcpe_mixture_max_sigma = float(fcpe_mixture_max_sigma)
+        self.fcpe_uses_mixture = self.fcpe_loss_mode in {
+            'discretized_mixture',
+            'mixture',
+            'asym_discretized_mixture',
+            'asymmetric_discretized_mixture',
+        }
         self.use_spk_concat = bool(use_spk_concat)
         self.use_spk_film = bool(use_spk_film)
         self.use_split_condition_optimization = bool(use_split_condition_optimization)
@@ -432,8 +551,8 @@ class F0CodecDecoder(nn.Module):
                                    )]
         
         # Final activation and output
-        # Skip final layers when using FCPE loss (not needed for training)
-        if not use_fcpe_loss:
+        # Skip final scalar-F0 layers when the decoder predicts an FCPE distribution.
+        if not self.fcpe_loss_enabled:
             if activation_type == 'LeakyReLU':
                 activation = nn.LeakyReLU(negative_slope=leaky_relu_params['negative_slope'])
             else:
@@ -449,12 +568,22 @@ class F0CodecDecoder(nn.Module):
         
         # FCPE-style latent prediction head (optional)
         # Keep logits in fp32 for a more stable BCEWithLogits path.
-        if self.use_fcpe_loss:
-            self.fcpe_head = WNConv1d(output_dim, self.fcpe_out_dims, kernel_size=1)
+        if self.fcpe_loss_enabled:
+            fcpe_head_dim = (
+                fcpe_mixture_param_count(self.fcpe_mixture_components)
+                if self.fcpe_uses_mixture
+                else self.fcpe_out_dims
+            )
+            self.fcpe_head = WNConv1d(output_dim, fcpe_head_dim, kernel_size=1)
             self.last_fcpe_logits = None
+            self.last_fcpe_mixture_params = None
             self.last_forward_debug = {}
-            print(f"F0CodecDecoder: FCPE loss enabled with {self.fcpe_out_dims}-dim latent prediction")
+            print(
+                "F0CodecDecoder: FCPE loss enabled "
+                f"(mode={self.fcpe_loss_mode}, latent_bins={self.fcpe_out_dims}, head_dim={fcpe_head_dim})"
+            )
         else:
+            self.last_fcpe_mixture_params = None
             self.last_forward_debug = {}
         
         # Cross-Attention Blocks (optional)
@@ -522,7 +651,7 @@ class F0CodecDecoder(nn.Module):
                      If use_mhca=True, this can be a tuple (spk_emb, mhca_key) where
                      mhca_key is a time-varying sequence for cross-attention (e.g., x_quantized).
         Returns:
-            if use_fcpe_loss:
+            if self.fcpe_loss_enabled:
                 tuple: (outs, fcpe_latent)
                 - outs: list of outputs for F0 conditioning
                 - fcpe_latent: (B, fcpe_out_dims, T) probabilities for FCPE decoding/monitoring
@@ -602,16 +731,34 @@ class F0CodecDecoder(nn.Module):
         # Skip one index (to match original structure at index 4)
         outs.append(None)  # outs[4]: placeholder (not used)
         
-        # Handle final output based on use_fcpe_loss
-        if self.use_fcpe_loss:
+        # Handle final output based on fcpe_loss_mode.
+        if self.fcpe_loss_enabled:
             # x is now the last DecoderBlock output (B, 16, T)
-            # Run the FCPE head in fp32 and expose logits for a stable BCEWithLogits loss.
+            # Run the FCPE head in fp32 and expose either dense logits or mixture params.
             debug_info["pre_fcpe"] = _tensor_debug_stats(x)
             with autocast(device_type=x.device.type, enabled=False):
-                fcpe_logits = self.fcpe_head(x.float())  # (B, 360, T)
-                fcpe_latent = torch.sigmoid(fcpe_logits)
+                fcpe_head_out = self.fcpe_head(x.float())
+                if self.fcpe_uses_mixture:
+                    fcpe_latent = fcpe_mixture_params_to_distribution(
+                        fcpe_head_out,
+                        num_bins=self.fcpe_out_dims,
+                        components=self.fcpe_mixture_components,
+                        min_sigma=self.fcpe_mixture_min_sigma,
+                        max_sigma=self.fcpe_mixture_max_sigma,
+                    )
+                    fcpe_logits = fcpe_latent.clamp_min(1.0e-8).log()
+                    self.last_fcpe_mixture_params = fcpe_head_out
+                else:
+                    fcpe_logits = fcpe_head_out
+                    fcpe_latent = torch.sigmoid(fcpe_logits)
+                    self.last_fcpe_mixture_params = None
             self.last_fcpe_logits = fcpe_logits
             debug_info["fcpe_logits"] = _tensor_debug_stats(fcpe_logits)
+            debug_info["fcpe_mixture_params"] = (
+                _tensor_debug_stats(self.last_fcpe_mixture_params)
+                if self.last_fcpe_mixture_params is not None
+                else None
+            )
             self.last_forward_debug = debug_info
             # For audio conditioning, we still need some F0 output
             # Use a dummy placeholder (won't be used for loss, only for conditioning)
@@ -619,6 +766,7 @@ class F0CodecDecoder(nn.Module):
             return outs, fcpe_latent
         else:
             self.last_fcpe_logits = None
+            self.last_fcpe_mixture_params = None
             debug_info["final_output"] = _tensor_debug_stats(x)
             self.last_forward_debug = debug_info
             # Normal mode: x is the final F0 reconstruction after activation + conv
@@ -645,8 +793,12 @@ class HoyeolStyleF0CodecDecoder(nn.Module):
         level2_num_layers=2,
         level1_num_layers=2,
         upsample_factor=4,
-        use_fcpe_loss=False,
         fcpe_out_dims=360,
+        fcpe_loss_mode=None,
+        fcpe_mixture_components=2,
+        fcpe_mixture_min_sigma=0.75,
+        fcpe_mixture_max_sigma=80.0,
+        use_fcpe_loss=None,  # Deprecated compatibility shim; prefer fcpe_loss_mode.
         speaker_condition=False,
         condition_dim=0,
         use_spk_concat=True,
@@ -680,8 +832,19 @@ class HoyeolStyleF0CodecDecoder(nn.Module):
         self.level1_num_layers = int(level1_num_layers)
         self.num_layers = self.level2_num_layers + self.level1_num_layers
         self.upsample_factor = int(upsample_factor)
-        self.use_fcpe_loss = bool(use_fcpe_loss)
         self.fcpe_out_dims = int(fcpe_out_dims)
+        self.fcpe_loss_mode = normalize_fcpe_loss_mode(fcpe_loss_mode, use_fcpe_loss)
+        self.fcpe_loss_enabled = fcpe_loss_mode_enabled(self.fcpe_loss_mode)
+        self.use_fcpe_loss = self.fcpe_loss_enabled
+        self.fcpe_mixture_components = int(fcpe_mixture_components)
+        self.fcpe_mixture_min_sigma = float(fcpe_mixture_min_sigma)
+        self.fcpe_mixture_max_sigma = float(fcpe_mixture_max_sigma)
+        self.fcpe_uses_mixture = self.fcpe_loss_mode in {
+            'discretized_mixture',
+            'mixture',
+            'asym_discretized_mixture',
+            'asymmetric_discretized_mixture',
+        }
         self.speaker_condition = bool(speaker_condition) and (bool(use_spk_concat) or bool(use_spk_film))
         self.use_spk_concat = bool(use_spk_concat)
         self.use_spk_film = bool(use_spk_film)
@@ -778,14 +941,21 @@ class HoyeolStyleF0CodecDecoder(nn.Module):
                 for _ in range(self.num_upsamples)
             ]
         )
-        if self.use_fcpe_loss:
-            self.fcpe_head = WNConv1d(self.dim, self.fcpe_out_dims, kernel_size=1)
+        if self.fcpe_loss_enabled:
+            fcpe_head_dim = (
+                fcpe_mixture_param_count(self.fcpe_mixture_components)
+                if self.fcpe_uses_mixture
+                else self.fcpe_out_dims
+            )
+            self.fcpe_head = WNConv1d(self.dim, fcpe_head_dim, kernel_size=1)
             self.output_head = None
             self.last_fcpe_logits = None
+            self.last_fcpe_mixture_params = None
         else:
             self.fcpe_head = None
             self.output_head = WNConv1d(self.dim, self.output_channels, kernel_size=7, padding=3)
             self.last_fcpe_logits = None
+            self.last_fcpe_mixture_params = None
         self.last_forward_debug = {}
 
         stage_dims = [self.dim] * (self.num_layers * self.stage_output_repeat)
@@ -797,13 +967,13 @@ class HoyeolStyleF0CodecDecoder(nn.Module):
             f"in_channels={self.in_channels}, dim={self.dim}, output_channels={self.output_channels}, "
             f"level2_num_layers={self.level2_num_layers}, level1_num_layers={self.level1_num_layers}, "
             f"upsample_factor={self.upsample_factor}, num_upsamples={self.num_upsamples}, "
-            f"use_fcpe_loss={self.use_fcpe_loss}, stage_output_repeat={self.stage_output_repeat}"
+            f"fcpe_loss_mode={self.fcpe_loss_mode}, stage_output_repeat={self.stage_output_repeat}"
         )
         print(
             "HoyeolStyleF0CodecDecoder stack: "
             "input_proj -> transformer_backbone_level2 -> transformer_backbone_level1 "
             f"-> ConvUpsample x{self.num_upsamples} -> "
-            f"{'fcpe_head' if self.use_fcpe_loss else 'output_head'}"
+            f"{'fcpe_head' if self.fcpe_loss_enabled else 'output_head'}"
         )
         if self.speaker_condition:
             print(
@@ -872,16 +1042,35 @@ class HoyeolStyleF0CodecDecoder(nn.Module):
             x = upsample(x)
             debug_info[f"after_convupsample_{idx + 1}"] = _tensor_debug_stats(x)
 
-        if self.use_fcpe_loss:
+        if self.fcpe_loss_enabled:
             with autocast(device_type=x.device.type, enabled=False):
-                fcpe_logits = self.fcpe_head(x.float())
-                fcpe_latent = torch.sigmoid(fcpe_logits)
+                fcpe_head_out = self.fcpe_head(x.float())
+                if self.fcpe_uses_mixture:
+                    fcpe_latent = fcpe_mixture_params_to_distribution(
+                        fcpe_head_out,
+                        num_bins=self.fcpe_out_dims,
+                        components=self.fcpe_mixture_components,
+                        min_sigma=self.fcpe_mixture_min_sigma,
+                        max_sigma=self.fcpe_mixture_max_sigma,
+                    )
+                    fcpe_logits = fcpe_latent.clamp_min(1.0e-8).log()
+                    self.last_fcpe_mixture_params = fcpe_head_out
+                else:
+                    fcpe_logits = fcpe_head_out
+                    fcpe_latent = torch.sigmoid(fcpe_logits)
+                    self.last_fcpe_mixture_params = None
             self.last_fcpe_logits = fcpe_logits
             debug_info["fcpe_logits"] = _tensor_debug_stats(fcpe_logits)
+            debug_info["fcpe_mixture_params"] = (
+                _tensor_debug_stats(self.last_fcpe_mixture_params)
+                if self.last_fcpe_mixture_params is not None
+                else None
+            )
             self.last_forward_debug = debug_info
             return outs, fcpe_latent
 
         self.last_fcpe_logits = None
+        self.last_fcpe_mixture_params = None
         x = self.output_head(x)
         debug_info["final_output"] = _tensor_debug_stats(x)
         self.last_forward_debug = debug_info

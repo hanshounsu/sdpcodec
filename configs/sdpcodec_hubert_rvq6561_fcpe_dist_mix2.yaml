@@ -1,0 +1,15 @@
+defaults:
+  - sdpcodec_hubert_rvq6561_fcpe_dist
+  - _self_
+
+model:
+  f0_codec:
+    fcpe_loss_mode: discretized_mixture
+    fcpe_mixture_components: 2
+    fcpe_mixture_min_sigma: 0.75
+    fcpe_mixture_max_sigma: 80.0
+    fcpe_dist_cdf_weight: 0.1
+
+train:
+  wandb_project: BigCodec
+  wandb_name: sdpcodec/hubert/MLS+LS/25Hz/rvq6561/nearbyrefclip/b4ddp2acc2/train6s/val6s/normf0_in/fcpe_dist_out/raw/mix2_asym_cdf01

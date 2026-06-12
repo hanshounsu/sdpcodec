@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Run SDPCodec-local SDDPCodec HuBERT RVQ6561 flexi duration-free config.
+# Run SDPCodec HuBERT RVQ6561 with raw FCPE distribution target loss.
 
-#SBATCH --job-name=sddpcodec_hu_rvq6561
+#SBATCH --job-name=sdpcodec_fcpe_dist
 #SBATCH --partition=all
 #SBATCH --account=hounsu
 #SBATCH --nodes=1
@@ -20,9 +20,11 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/data/hounsu/voice/sdpcodec/outputs}"
 SLURM_LOG_ROOT="${SLURM_LOG_ROOT:-/data/hounsu/voice/sdpcodec/slurm_logs}"
 CACHE_ROOT="${CACHE_ROOT:-/data/hounsu/voice/sdpcodec/cache}"
 DOCKER_IMAGE="${DOCKER_IMAGE:-hounsu_sdpcodec:260416}"
-PYTHON_BIN="${PYTHON_BIN:-/opt/conda/envs/bigcodec/bin/python}"
+CONDA_ENV="${CONDA_ENV:-bigcodec}"
+PYTHON_BIN="${PYTHON_BIN:-/opt/conda/envs/${CONDA_ENV}/bin/python}"
 REF_ENV_SCRIPT="${REF_ENV_SCRIPT:-/home/hounsu/run_hubert_enc_vocosformer_24kHz_trixbase.sh}"
-CONFIG_NAME="${CONFIG_NAME:-sddpcodec_hubert_rvq6561}"
+CONFIG_NAME="${CONFIG_NAME:-sdpcodec_hubert_rvq6561_fcpe_dist}"
+FCPE_RUN_SUFFIX="${FCPE_RUN_SUFFIX:-wbce_a2}"
 
 GPUS="${GPUS:-2}"
 PER_DEVICE_BATCH="${PER_DEVICE_BATCH:-4}"
@@ -41,13 +43,7 @@ RUN_HASH="${RUN_HASH:-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')}"
 RUN_STAMP="${RUN_STAMP:-$(date +%F-%H-%M-%S)-${RUN_HASH}}"
 HYDRA_RUN_DIR="${HYDRA_RUN_DIR:-${OUTPUT_ROOT}/${RUN_STAMP}}"
 BATCH_TAG="b${PER_DEVICE_BATCH}ddp${GPUS}acc${GRAD_ACCUM}"
-DURATION_TAG="${DURATION_TAG:-durfree/flexi/dynthr085-100/evalthr090/localattn16/maxspan16/gtdur}"
-if [[ "${CONFIG_NAME}" == *"wavlm_nopos_targetctx"* ]]; then
-  WANDB_BASE="${WANDB_BASE:-sddpcodec/hubert/MLS+LS/25Hz/rvq6561/targetctxrefclip/wavlm_nopos/no_posconv_no_relpos}"
-else
-  WANDB_BASE="${WANDB_BASE:-sddpcodec/hubert/MLS+LS/25Hz/rvq6561/nearbyrefclip}"
-fi
-EXPECTED_WANDB_PREFIX="${WANDB_BASE}/${BATCH_TAG}/train6s/val6s/${DURATION_TAG}"
+EXPECTED_WANDB_PREFIX="sdpcodec/hubert/MLS+LS/25Hz/rvq6561/nearbyrefclip/${BATCH_TAG}/train6s/val6s/normf0_in/fcpe_dist_out/raw/${FCPE_RUN_SUFFIX}"
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-${EXPECTED_WANDB_PREFIX}/${RUN_STAMP}}"
 if [[ "${WANDB_RUN_NAME}" != "${EXPECTED_WANDB_PREFIX}/"* ]]; then
   echo "[run] WANDB_RUN_NAME must start with computed prefix ${EXPECTED_WANDB_PREFIX}/: ${WANDB_RUN_NAME}" >&2
@@ -82,7 +78,13 @@ export WANDB_API_KEY="${WANDB_API_KEY:-$(extract_ref_env WANDB_API_KEY)}"
 export HUGGINGFACE_HUB_TOKEN="${HUGGINGFACE_HUB_TOKEN:-$(extract_ref_env HUGGINGFACE_HUB_TOKEN)}"
 export HF_TOKEN="${HF_TOKEN:-${HUGGINGFACE_HUB_TOKEN}}"
 
+if [[ -z "${WANDB_API_KEY}" || -z "${HUGGINGFACE_HUB_TOKEN}" ]]; then
+  echo "[run] missing WANDB_API_KEY or HUGGINGFACE_HUB_TOKEN from ${REF_ENV_SCRIPT}" >&2
+  exit 1
+fi
+
 mkdir -p "${SLURM_LOG_ROOT}" "${OUTPUT_ROOT}" "${CACHE_ROOT}" "${HF_HOME}" "${TORCH_HOME}" "${S3PRL_CACHE_ROOT}" "${MPLCONFIGDIR}" "${XDG_CACHE_HOME}"
+
 cd "${REPO_ROOT}"
 
 GPU_LIST="${SLURM_JOB_GPUS:-}"
@@ -90,8 +92,9 @@ DOCKER_GPU_ARGS=(--gpus all)
 if [[ -n "${GPU_LIST}" ]]; then
   DOCKER_GPU_ARGS=(--gpus "\"device=${GPU_LIST}\"")
 fi
+
 UID_GID="$(id -u):$(id -g)"
-CONTAINER_PREFIX="sddpcodec_${SLURM_JOB_ID:-manual}"
+CONTAINER_PREFIX="sdpcodec_fcpedist_${SLURM_JOB_ID:-manual}"
 
 cleanup_containers() {
   docker rm -f "${CONTAINER_PREFIX}_debug" "${CONTAINER_PREFIX}_main" >/dev/null 2>&1 || true
@@ -119,6 +122,7 @@ if [[ -n "${EXTRA_OVERRIDES}" ]]; then
   ARGS+=("${EXTRA_ARGS[@]}")
 fi
 
+echo "[run] host=$(hostname)"
 echo "[run] repo=${REPO_ROOT}"
 echo "[run] git=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 echo "[run] docker_image=${DOCKER_IMAGE}"
@@ -183,7 +187,7 @@ run_train() {
 }
 
 verify_debug_log() {
-  local log_path="${SLURM_LOG_ROOT}/${SLURM_JOB_NAME:-sddpcodec_hu_rvq6561}-${SLURM_JOB_ID}.out"
+  local log_path="${SLURM_LOG_ROOT}/${SLURM_JOB_NAME:-sdpcodec_fcpe_dist}-${SLURM_JOB_ID}.out"
   if [[ ! -f "${log_path}" ]]; then
     echo "[debug] cannot verify log; missing ${log_path}" >&2
     exit 2

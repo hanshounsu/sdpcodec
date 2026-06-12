@@ -1,0 +1,15 @@
+defaults:
+  - sdpcodec_hubert_rvq6561
+  - _self_
+
+model:
+  f0_codec:
+    fcpe_loss_mode: dense
+    use_fcpe_input_dist: false
+    use_fcpe_input_vuv: false
+    fcpe_loss_target: raw
+    fcpe_bce_weight_alpha: 2.0
+
+train:
+  wandb_project: BigCodec
+  wandb_name: sdpcodec/hubert/MLS+LS/25Hz/rvq6561/nearbyrefclip/b4ddp2acc2/train6s/val6s/normf0_in/fcpe_dist_out/raw/wbce_a2

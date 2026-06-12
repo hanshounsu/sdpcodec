@@ -40,7 +40,13 @@ DEBUG_DATASET_NAME="${DEBUG_DATASET_NAME:-librispeech}"
 RUN_HASH="${RUN_HASH:-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')}"
 RUN_STAMP="${RUN_STAMP:-$(date +%F-%H-%M-%S)-${RUN_HASH}}"
 HYDRA_RUN_DIR="${HYDRA_RUN_DIR:-${OUTPUT_ROOT}/${RUN_STAMP}}"
-WANDB_RUN_NAME="${WANDB_RUN_NAME:-sdpcodec/hubert/MLS+LS/25Hz/rvq6561/nearbyrefclip/b4ddp2acc2/train6s/val6s/current/${RUN_STAMP}}"
+BATCH_TAG="b${PER_DEVICE_BATCH}ddp${GPUS}acc${GRAD_ACCUM}"
+EXPECTED_WANDB_PREFIX="sdpcodec/hubert/MLS+LS/25Hz/rvq6561/nearbyrefclip/${BATCH_TAG}/train6s/val6s/current"
+WANDB_RUN_NAME="${WANDB_RUN_NAME:-${EXPECTED_WANDB_PREFIX}/${RUN_STAMP}}"
+if [[ "${WANDB_RUN_NAME}" != "${EXPECTED_WANDB_PREFIX}/"* ]]; then
+  echo "[run] WANDB_RUN_NAME must start with computed prefix ${EXPECTED_WANDB_PREFIX}/: ${WANDB_RUN_NAME}" >&2
+  exit 2
+fi
 EXTRA_OVERRIDES="${EXTRA_OVERRIDES:-}"
 
 export HF_HOME="${HF_HOME:-/data/hounsu/.cache/huggingface}"
@@ -120,6 +126,8 @@ echo "[run] docker_image=${DOCKER_IMAGE}"
 echo "[run] hydra_run_dir=${HYDRA_RUN_DIR}"
 echo "[run] wandb_project=BigCodec"
 echo "[run] wandb_name=${WANDB_RUN_NAME}"
+echo "[run] batch_tag=${BATCH_TAG}"
+echo "[run] expected_wandb_prefix=${EXPECTED_WANDB_PREFIX}"
 echo "[run] slurm_log_root=${SLURM_LOG_ROOT}"
 echo "[run] torch_home=${TORCH_HOME}"
 echo "[run] s3prl_cache_root=${S3PRL_CACHE_ROOT}"

@@ -1,5 +1,10 @@
 # SDPCodec Agent Notes
 
+Repo-specific procedural knowledge lives in `.codex/skills/`. Use
+`sdpcodec-experiment-ops` for experiment lookup, SLURM launcher creation or
+editing, W&B/Hydra run-name checks, launch/resume triage, and metric/log
+diagnosis. Do not install SDPCodec-specific knowledge as a global Codex skill.
+
 ## Artifact Placement
 
 - Keep source code, configs, docs, and small manifests in `/home/hounsu/voice/sdpcodec`.
@@ -32,6 +37,22 @@
   For the standard 2-GPU, per-device batch 4 launch, set
   `train.gradient_accumulation_steps=2` and keep
   `train.trainer.accumulate_grad_batches=1`.
+- W&B names must always match the live experiment config. This is a hard
+  requirement, not a cosmetic label. For every new or edited SLURM launcher,
+  derive the batch slug from the actual runtime variables:
+  `b${PER_DEVICE_BATCH}ddp${GPUS}acc${GRAD_ACCUM}`. Do not hard-code an old
+  `b*ddp*acc*` tag, and do not trust a copied W&B name until it is checked
+  against `dataset.train.batch_size`, `train.trainer.devices`, and
+  `train.gradient_accumulation_steps`.
+- If `WANDB_RUN_NAME` is user-provided or inherited from the environment, the
+  launcher must reject it unless it matches the computed semantic prefix and
+  batch slug for that launcher. Never launch a run with a stale W&B name such
+  as `b4ddp4acc1` when the actual runtime is `b4ddp2acc2`.
+- Before reporting or comparing an experiment, treat `train.wandb_name` as a
+  label that must be cross-checked against `hydra/overrides.yaml`,
+  `hydra/config.yaml`, launcher stdout lines such as `global_batch=...`, and
+  W&B metadata. If the label and config disagree, report the mismatch clearly
+  and use the config/logged runtime values as the source of truth.
 - Never launch, submit, resume, restart, or otherwise start any experiment
   unless the user explicitly asks to run that exact action in the current
   conversation. Editing configs/scripts, answering questions, checking status,
